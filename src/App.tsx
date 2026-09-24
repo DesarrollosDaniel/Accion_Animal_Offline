@@ -99,12 +99,14 @@ function Login() {
         <div className="login-brand-inner">
           <img src="./logo.jpg" alt="Logotipo de Acción Animal" className="login-logo" />
           <h1>Acción Animal</h1>
+          <p className="environment-badge">ENTORNO DE PRUEBAS</p>
           <p className="login-copy">Sistema de gestión</p>
         </div>
       </section>
       <section className="login-panel">
         <form className="login-card" onSubmit={submit}>
           <div className="mobile-logo"><img src="./logo.jpg" alt="Acción Animal" /></div>
+          <p className="environment-badge environment-badge-dark">ENTORNO DE PRUEBAS</p>
           <p className="eyebrow">Bienvenido</p>
           <h2>Inicia sesión</h2>
           <p className="muted">Usa la cuenta proporcionada por el administrador.</p>
@@ -596,7 +598,7 @@ function Workspace({ session, onSignOut }: { session: Session; onSignOut: () => 
       <aside className={`sidebar ${mobileNav ? 'open' : ''}`}>
         <div className="sidebar-brand">
           <img src="./logo.jpg" alt="Acción Animal" />
-          <div><strong>Acción Animal</strong><span>Gestión clínica</span></div>
+          <div><strong>Acción Animal</strong><span>ENTORNO DE PRUEBAS</span></div>
         </div>
         <nav aria-label="Navegación principal">
           <p className="nav-caption">MENÚ</p>

@@ -5,6 +5,9 @@ import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { assertTestEnvironment } from '../scripts/test-environment.mjs'
+
+assertTestEnvironment()
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const distRoot = path.join(projectRoot, 'dist')

@@ -1,5 +1,13 @@
 # Acción Animal — reconstrucción con Supabase
 
+## Entorno de pruebas de esta carpeta
+
+Esta copia usa exclusivamente el proyecto Supabase `wuenfwsjifwuupfjgubm`. El arranque y la compilación comprueban que `.env.local` y el proyecto enlazado en `supabase/.temp/project-ref` coincidan con ese proyecto. También se rechazan URL de PostgreSQL remoto y carpetas de adjuntos que no sean `uploaded` dentro de esta copia. La interfaz muestra **ENTORNO DE PRUEBAS**.
+
+Antes de operar con la CLI, ejecuta `npm run check:environment`. Para enviar migraciones al proyecto de pruebas, usa `npm run db:push:test`, que realiza la comprobación antes de ejecutar la CLI. Los comandos `npx supabase ...` escritos directamente no pasan por este control. Si falta el enlace, vuelve a enlazar esta carpeta al proyecto de pruebas y comprueba el resultado antes de continuar.
+
+La base PostgreSQL local de desarrollo se llama `accion_animal_dev`. La aplicación de esta etapa sigue conectada al proyecto Supabase de pruebas; crear esa base local no cambia automáticamente la conexión de la aplicación.
+
 Esta carpeta contendrá la nueva versión del sistema. El proyecto PHP original se conserva intacto como referencia funcional y de datos.
 
 ## Objetivo confirmado
@@ -95,7 +103,7 @@ La administración de cuentas se realiza mediante la Supabase Edge Function aute
 
 ## Ejecución local
 
-La configuración real está en `.env.local`, archivo ignorado por Git. Para preparar otra computadora, copiar `.env.example` como `.env.local` y sustituir el marcador de la clave publicable.
+La configuración de esta copia de pruebas está en `.env.local`, archivo ignorado por Git. Debe contener la URL y la clave publicable del proyecto Supabase de pruebas.
 
 ```powershell
 npm ci
@@ -104,7 +112,7 @@ npm run local
 
 La preparación completa de la PC servidor, el firewall y la copia de archivos se explica en [`ALMACENAMIENTO_LOCAL.md`](ALMACENAMIENTO_LOCAL.md).
 
-`npm run local` es el comando de uso normal: compila la aplicación y levanta la interfaz junto con el almacenamiento en `http://localhost:4173`.
+`npm run local` compila la aplicación de pruebas y levanta la interfaz junto con el almacenamiento en `http://localhost:4174`.
 
 Solo para desarrollar la interfaz sin el servidor de archivos puede usarse:
 

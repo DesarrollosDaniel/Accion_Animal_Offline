@@ -5,11 +5,18 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "predev": "node scripts/check-test-environment.mjs",
     "build": "tsc -b && vite build",
+    "prebuild": "node scripts/check-test-environment.mjs",
     "preview": "vite preview",
+    "prepreview": "node scripts/check-test-environment.mjs",
     "start:local": "node --env-file-if-exists=.env.local --env-file-if-exists=.env.server server/local-server.mjs",
+    "prestart:local": "node scripts/check-test-environment.mjs",
     "local": "npm run build && npm run start:local",
-    "typecheck": "tsc -b --pretty false"
+    "typecheck": "tsc -b --pretty false",
+    "check:environment": "node scripts/check-test-environment.mjs",
+    "test:environment": "node --test scripts/test-environment.test.mjs",
+    "db:push:test": "node scripts/push-test-db.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.116.0",
