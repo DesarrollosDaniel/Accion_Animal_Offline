@@ -1,0 +1,21 @@
+# Datos reales y archivos clínicos: nunca publicar
+/uploaded/
+/legacy-data/
+/*.sql
+
+# Configuración local y secretos
+.env
+.env.*
+!.env.example
+
+# Dependencias y compilación
+node_modules/
+dist/
+*.tsbuildinfo
+.tmp-*/
+supabase/.temp/
+
+# Herramientas y sistema operativo
+.DS_Store
+Thumbs.db
+*.log
