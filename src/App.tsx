@@ -471,13 +471,16 @@ function DeleteUserForm({ user, onClose, onDeleted }: { user: Profile; onClose: 
   )
 }
 
-function LocalPreview() {
+function LocalPreview({ role }: { role: Role }) {
   const [pets, setPets] = useState<Pet[]>([])
   const [selected, setSelected] = useState<Pet | null>(null)
   const [records, setRecords] = useState<Array<{ id: string; occurred_at: string; provisional_diagnosis: string | null; treatment: string | null }>>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [loadingRecords, setLoadingRecords] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [recordsRevision, setRecordsRevision] = useState(0)
+  const [saved, setSaved] = useState(false)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -506,13 +509,44 @@ function LocalPreview() {
       .catch((cause) => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Error de consulta local.') })
       .finally(() => { if (!controller.signal.aborted) setLoadingRecords(false) })
     return () => controller.abort()
-  }, [selected])
+  }, [selected, recordsRevision])
+
+  async function saveRecord(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!selected) return
+    const form = event.currentTarget
+    const data = new FormData(form)
+    setSaving(true)
+    setError('')
+    setSaved(false)
+    try {
+      const response = await fetch(`/api/local/pets/${selected.id}/clinical-records`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ record: {
+          occurred_at: new Date().toISOString(),
+          provisional_diagnosis: String(data.get('diagnosis') || '').trim(),
+          treatment: String(data.get('treatment') || '').trim() || null,
+        } }),
+      })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error || 'No fue posible guardar el expediente local.')
+      form.reset()
+      setSaved(true)
+      setRecordsRevision((current) => current + 1)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No fue posible guardar el expediente local.')
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return <section className="panel page-panel">
-    <div className="page-actions"><div><p className="eyebrow">PostgreSQL local</p><h2>Datos locales de prueba</h2><p className="muted">Vista de solo lectura, limitada a 200 mascotas. La pantalla principal todavía usa Supabase.</p></div></div>
+    <div className="page-actions"><div><p className="eyebrow">PostgreSQL local</p><h2>Datos locales de prueba</h2><p className="muted">Consulta limitada a 200 mascotas. Los expedientes creados aquí quedan solo en PostgreSQL local de pruebas; la pantalla principal todavía usa Supabase.</p></div></div>
     {error && <p className="form-error" role="alert">{error}</p>}
+    {saved && <p role="status">Expediente guardado en PostgreSQL local.</p>}
     {loading ? <p>Cargando datos locales…</p> : pets.length === 0 ? <p>No hay mascotas en PostgreSQL local.</p> : <div className="table-wrap responsive-table"><table><thead><tr><th>Mascota</th><th>Tutor</th><th>Especie</th><th>Estado</th><th>Acción</th></tr></thead><tbody>{pets.map((pet) => <tr key={pet.id}><td>{pet.name}</td><td>{pet.guardian_name}</td><td>{pet.species}</td><td>{pet.status}</td><td><button className="text-button" onClick={() => { setError(''); setSelected(pet) }}>Ver expedientes</button></td></tr>)}</tbody></table></div>}
-    {selected && <div><h3>{selected.name}</h3><p>Tutor: {selected.guardian_name} · Fecha de nacimiento: {selected.birth_date || '—'}</p><h4>Expedientes locales</h4>{loadingRecords ? <p>Cargando expedientes…</p> : records.length ? records.map((record) => <p key={record.id}>{formatDate(record.occurred_at, true)} · {record.provisional_diagnosis || 'Sin diagnóstico'} · {record.treatment || 'Sin tratamiento'}</p>) : <p>Sin expedientes registrados.</p>}</div>}
+    {selected && <div><h3>{selected.name}</h3><p>Tutor: {selected.guardian_name} · Fecha de nacimiento: {selected.birth_date || '—'}</p><h4>Expedientes locales</h4>{loadingRecords ? <p>Cargando expedientes…</p> : records.length ? records.map((record) => <p key={record.id}>{formatDate(record.occurred_at, true)} · {record.provisional_diagnosis || 'Sin diagnóstico'} · {record.treatment || 'Sin tratamiento'}</p>) : <p>Sin expedientes registrados.</p>}{role !== 'reception' && <form className="form-grid" onSubmit={(event) => void saveRecord(event)}><label>Diagnóstico de prueba<input name="diagnosis" required maxLength={10000} /></label><label>Tratamiento de prueba<input name="treatment" maxLength={20000} /></label><div className="form-actions span-2"><button className="button primary" type="submit" disabled={saving}>{saving ? 'Guardando…' : 'Guardar expediente local de prueba'}</button></div></form>}</div>}
   </section>
 }
 
@@ -679,7 +713,7 @@ function Workspace({ session, onSignOut }: { session: Session; onSignOut: () => 
           {error && <div className="alert error"><strong>No se pudo cargar toda la información.</strong><span>{error}</span></div>}
           {notice && <div className="alert success" role="status"><ShieldCheck size={18} /><span>{notice}</span></div>}
 
-          {view === 'local-preview' && <LocalPreview />}
+          {view === 'local-preview' && <LocalPreview role={profile.role} />}
 
           {view === 'dashboard' && (
             <>
