@@ -222,7 +222,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   )
 }
 
-function PetForm({ onClose, onSaved }: { onClose: () => void; onSaved: (petId: string) => Promise<void> }) {
+function PetForm({ onClose, onSaved, local = false }: { onClose: () => void; onSaved: (petId: string) => Promise<void>; local?: boolean }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [species, setSpecies] = useState<keyof typeof vaccineOptions | ''>('')
@@ -283,6 +283,24 @@ function PetForm({ onClose, onSaved }: { onClose: () => void; onSaved: (petId: s
     if (selectedVaccinations.some((entry) => !(vaccineOptions[species] as readonly string[]).includes(entry.vaccine_name))) {
       setError('La vacuna seleccionada no corresponde a la especie de la mascota.')
       setSaving(false)
+      return
+    }
+    if (local) {
+      try {
+        const response = await fetch('/api/local/pets', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pet: payload, vaccinations: selectedVaccinations.map((entry) => ({ ...entry, administered_on: entry.administered_on || todayDateValue() })), note: observation || null }),
+        })
+        const body = await response.json()
+        if (!response.ok) throw new Error(body.error || 'No fue posible guardar la mascota local.')
+        await onSaved(body.data.id)
+        onClose()
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : 'No fue posible guardar la mascota local.')
+      } finally {
+        setSaving(false)
+      }
       return
     }
     const { data: insertedPet, error: insertError } = await supabase.from('pets').insert(payload).select('id').single()
@@ -473,6 +491,8 @@ function DeleteUserForm({ user, onClose, onDeleted }: { user: Profile; onClose: 
 
 function LocalPreview({ role }: { role: Role }) {
   const [pets, setPets] = useState<Pet[]>([])
+  const [petsRevision, setPetsRevision] = useState(0)
+  const [creatingPet, setCreatingPet] = useState(false)
   const [selected, setSelected] = useState<Pet | null>(null)
   const [records, setRecords] = useState<Array<{ id: string; occurred_at: string; provisional_diagnosis: string | null; treatment: string | null }>>([])
   const [error, setError] = useState('')
@@ -480,7 +500,7 @@ function LocalPreview({ role }: { role: Role }) {
   const [loadingRecords, setLoadingRecords] = useState(false)
   const [saving, setSaving] = useState(false)
   const [recordsRevision, setRecordsRevision] = useState(0)
-  const [saved, setSaved] = useState(false)
+  const [saved, setSaved] = useState('')
 
   useEffect(() => {
     const controller = new AbortController()
@@ -493,7 +513,7 @@ function LocalPreview({ role }: { role: Role }) {
       .catch((cause) => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Error de consulta local.') })
       .finally(() => { if (!controller.signal.aborted) setLoading(false) })
     return () => controller.abort()
-  }, [])
+  }, [petsRevision])
 
   useEffect(() => {
     if (!selected) return
@@ -518,7 +538,7 @@ function LocalPreview({ role }: { role: Role }) {
     const data = new FormData(form)
     setSaving(true)
     setError('')
-    setSaved(false)
+    setSaved('')
     try {
       const response = await fetch(`/api/local/pets/${selected.id}/clinical-records`, {
         method: 'POST',
@@ -532,7 +552,7 @@ function LocalPreview({ role }: { role: Role }) {
       const body = await response.json()
       if (!response.ok) throw new Error(body.error || 'No fue posible guardar el expediente local.')
       form.reset()
-      setSaved(true)
+      setSaved('Expediente guardado en PostgreSQL local.')
       setRecordsRevision((current) => current + 1)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'No fue posible guardar el expediente local.')
@@ -542,11 +562,12 @@ function LocalPreview({ role }: { role: Role }) {
   }
 
   return <section className="panel page-panel">
-    <div className="page-actions"><div><p className="eyebrow">PostgreSQL local</p><h2>Datos locales de prueba</h2><p className="muted">Consulta limitada a 200 mascotas. Los expedientes creados aquí quedan solo en PostgreSQL local de pruebas; la pantalla principal todavía usa Supabase.</p></div></div>
+    <div className="page-actions"><div><p className="eyebrow">PostgreSQL local</p><h2>Datos locales de prueba</h2><p className="muted">Consulta limitada a 200 mascotas. Los registros creados aquí quedan solo en PostgreSQL local de pruebas; la pantalla principal todavía usa Supabase.</p></div>{role !== 'reception' && <button className="button primary" onClick={() => setCreatingPet(true)}><Plus size={18} /> Nueva mascota local de prueba</button>}</div>
     {error && <p className="form-error" role="alert">{error}</p>}
-    {saved && <p role="status">Expediente guardado en PostgreSQL local.</p>}
+    {saved && <p role="status">{saved}</p>}
     {loading ? <p>Cargando datos locales…</p> : pets.length === 0 ? <p>No hay mascotas en PostgreSQL local.</p> : <div className="table-wrap responsive-table"><table><thead><tr><th>Mascota</th><th>Tutor</th><th>Especie</th><th>Estado</th><th>Acción</th></tr></thead><tbody>{pets.map((pet) => <tr key={pet.id}><td>{pet.name}</td><td>{pet.guardian_name}</td><td>{pet.species}</td><td>{pet.status}</td><td><button className="text-button" onClick={() => { setError(''); setSelected(pet) }}>Ver expedientes</button></td></tr>)}</tbody></table></div>}
     {selected && <div><h3>{selected.name}</h3><p>Tutor: {selected.guardian_name} · Fecha de nacimiento: {selected.birth_date || '—'}</p><h4>Expedientes locales</h4>{loadingRecords ? <p>Cargando expedientes…</p> : records.length ? records.map((record) => <p key={record.id}>{formatDate(record.occurred_at, true)} · {record.provisional_diagnosis || 'Sin diagnóstico'} · {record.treatment || 'Sin tratamiento'}</p>) : <p>Sin expedientes registrados.</p>}{role !== 'reception' && <form className="form-grid" onSubmit={(event) => void saveRecord(event)}><label>Diagnóstico de prueba<input name="diagnosis" required maxLength={10000} /></label><label>Tratamiento de prueba<input name="treatment" maxLength={20000} /></label><div className="form-actions span-2"><button className="button primary" type="submit" disabled={saving}>{saving ? 'Guardando…' : 'Guardar expediente local de prueba'}</button></div></form>}</div>}
+    {creatingPet && <Modal title="Registrar mascota local de prueba" onClose={() => setCreatingPet(false)}><PetForm local onClose={() => setCreatingPet(false)} onSaved={async () => { setSelected(null); setSaved('Mascota guardada en PostgreSQL local.'); setPetsRevision((current) => current + 1) }} /></Modal>}
   </section>
 }
 
