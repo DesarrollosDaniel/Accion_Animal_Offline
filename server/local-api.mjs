@@ -160,15 +160,33 @@ export async function handleLocalApi(req, res, url, pool, currentSession, storag
   const parts = url.pathname.split('/').filter(Boolean)
   if (parts[0] !== 'api' || parts[1] !== 'local') return reply(res, 404, { error: 'Ruta no encontrada.' })
 
+  if (parts.length === 3 && parts[2] === 'summary') {
+    const { rows } = await pool.query(`
+      SELECT
+        (SELECT count(*) FROM aa_local.pets WHERE status = 'active') AS "activePets",
+        (SELECT count(*) FROM aa_local.pets WHERE status <> 'active') AS "inactivePets",
+        (SELECT count(*) FROM aa_local.clinical_records) AS "clinicalRecords"`)
+    return reply(res, 200, { data: {
+      activePets: Number(rows[0].activePets),
+      inactivePets: Number(rows[0].inactivePets),
+      clinicalRecords: Number(rows[0].clinicalRecords),
+    } })
+  }
+
   if (parts.length === 3 && parts[2] === 'pets') {
     const status = url.searchParams.get('status') || 'active'
     if (!['active', 'inactive', 'deceased', 'all'].includes(status)) {
       return reply(res, 400, { error: 'Estado de mascota inválido.' })
     }
+    const search = url.searchParams.get('search')?.trim() || ''
+    if (search.length > 100) return reply(res, 400, { error: 'Búsqueda demasiado larga.' })
+    const pattern = `%${search.toLowerCase().replace(/[\\%_]/g, (character) => `\\${character}`)}%`
     const { rows } = await pool.query(
       `SELECT * FROM aa_local.pets WHERE ($1::text = 'all' OR status::text = $1)
+       ${search ? `AND (lower(name) LIKE $5 OR lower(species) LIKE $5 OR lower(breed) LIKE $5
+         OR lower(guardian_name) LIKE $5 OR guardian_phone LIKE $5 OR legacy_id::text = $4)` : ''}
        ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3`,
-      [status, page.limit, page.offset],
+      search ? [status, page.limit, page.offset, search, pattern] : [status, page.limit, page.offset],
     )
     return reply(res, 200, { data: rows })
   }

@@ -20,6 +20,7 @@ async function request(path, { session = { userId, role: 'veterinarian' }, rows 
     async query(sql, values) {
       calls.push({ sql, values })
       if (sql.includes('FROM aa_local.profiles')) return { rows: rows.profile || [{ role: 'veterinarian', is_active: true }] }
+      if (sql.includes('AS "activePets"')) return { rows: rows.summary || [{ activePets: '2', inactivePets: '1', clinicalRecords: '3' }] }
       if (sql.includes('SELECT id FROM aa_local.pets')) return { rows: rows.pet || [{ id: petId }] }
       if (sql.includes('FROM aa_local.pets')) return { rows: rows.pets || [] }
       return { rows: rows.children || [] }
@@ -50,10 +51,20 @@ test('consulta mascotas con valores parametrizados y paginación acotada', async
   assert.equal(calls[1].sql.includes('aa_local.pets'), true)
 })
 
+test('busca mascotas sin interpretar comodines y cuenta el resumen local', async () => {
+  const searched = await request('/api/local/pets?status=all&search=100%25_', { rows: { pets: [{ id: petId }] } })
+  assert.equal(searched.res.status, 200)
+  assert.deepEqual(searched.calls[1].values, ['all', 100, 0, '100%_', '%100\\%\\_%'])
+  assert.match(searched.calls[1].sql, /lower\(name\) LIKE \$5/)
+  const summary = await request('/api/local/summary')
+  assert.deepEqual(summary.res.body.data, { activePets: 2, inactivePets: 1, clinicalRecords: 3 })
+})
+
 test('rechaza identificadores y límites inválidos', async () => {
   assert.equal((await request('/api/local/pets/not-a-uuid')).res.status, 400)
   assert.equal((await request('/api/local/pets?limit=201')).res.status, 400)
   assert.equal((await request('/api/local/pets?status=active%27%20OR%201=1')).res.status, 400)
+  assert.equal((await request(`/api/local/pets?search=${'x'.repeat(101)}`)).res.status, 400)
 })
 
 test('rechaza escrituras de recepción y de otro origen', async () => {
