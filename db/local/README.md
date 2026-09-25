@@ -145,3 +145,32 @@ de código que verifica un archivo físico lo crea en una carpeta temporal y lo
 borra al terminar.
 
 Estas rutas aún dependen de la sesión Supabase y no son acceso sin internet.
+
+## Ensayo de importación desde Supabase de pruebas
+
+`scripts/import-test-data.mjs` lee las nueve tablas de datos clínicos y perfiles del proyecto
+Supabase de **pruebas** y conserva UUID, fechas y relaciones en `aa_local`.
+Rechaza otra referencia de proyecto, un destino con datos clínicos o una cola
+de sincronización existente. La lectura remota usa una transacción de solo
+lectura; la importación local usa una sola transacción. Por defecto verifica
+recuentos y termina en `ROLLBACK`. No copia archivos de `uploaded` ni prepara
+el punto inicial de sincronización ni el historial `audit_events`; no usar este
+script para producción.
+
+En una nueva terminal PowerShell, obtener en **Connect → Session pooler** la
+URI PostgreSQL del proyecto de **pruebas** (puerto 5432). La URI de conexión
+directa `db.<proyecto>.supabase.co` puede requerir IPv6 y no resolver desde
+esta PC. No pegar contraseñas ni URI en el chat o en archivos del repositorio.
+Introducir ambas sin mostrarlas:
+
+```powershell
+$env:AA_TEST_DB_URL = Read-Host 'URI PostgreSQL de Supabase de pruebas' -MaskInput
+$env:AA_DB_PASSWORD = Read-Host 'Contraseña de aa_local_app' -MaskInput
+node scripts/import-test-data.mjs --check
+```
+
+Solo después de revisar que el recuento coincide con el origen de pruebas,
+ejecutar `node scripts/import-test-data.mjs --apply` para conservar la copia
+local de pruebas. El destino `accion_animal_dev` puede tener perfiles creados
+por el inicio de sesión, siempre que también existan en el origen de pruebas.
+El script falla antes de importar si ya hay datos clínicos locales.
