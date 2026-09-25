@@ -26,7 +26,7 @@ import { vaccineOptions } from './lib/vaccines'
 import { PetDetails, type DetailedPet } from './components/PetDetails'
 
 type Role = 'owner' | 'veterinarian' | 'reception'
-type View = 'dashboard' | 'pets' | 'inactive-pets' | 'users'
+type View = 'dashboard' | 'pets' | 'inactive-pets' | 'local-preview' | 'users'
 
 interface Profile {
   id: string
@@ -50,6 +50,7 @@ const navItems: Array<{ id: View; label: string; icon: typeof LayoutDashboard; o
   { id: 'dashboard', label: 'Resumen', icon: LayoutDashboard },
   { id: 'pets', label: 'Mascotas', icon: PawPrint },
   { id: 'inactive-pets', label: 'Mascotas inactivas', icon: PawPrint },
+  { id: 'local-preview', label: 'Datos locales (prueba)', icon: PawPrint },
   { id: 'users', label: 'Usuarios', icon: ShieldCheck, ownerOnly: true },
 ]
 
@@ -470,13 +471,58 @@ function DeleteUserForm({ user, onClose, onDeleted }: { user: Profile; onClose: 
   )
 }
 
+function LocalPreview() {
+  const [pets, setPets] = useState<Pet[]>([])
+  const [selected, setSelected] = useState<Pet | null>(null)
+  const [records, setRecords] = useState<Array<{ id: string; occurred_at: string; provisional_diagnosis: string | null; treatment: string | null }>>([])
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [loadingRecords, setLoadingRecords] = useState(false)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void fetch('/api/local/pets?status=all&limit=200', { signal: controller.signal })
+      .then(async (response) => {
+        const body = await response.json()
+        if (!response.ok) throw new Error(body.error || 'No fue posible consultar PostgreSQL local.')
+        setPets(body.data as Pet[])
+      })
+      .catch((cause) => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Error de consulta local.') })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
+    return () => controller.abort()
+  }, [])
+
+  useEffect(() => {
+    if (!selected) return
+    const controller = new AbortController()
+    setRecords([])
+    setLoadingRecords(true)
+    void fetch(`/api/local/pets/${selected.id}/clinical-records?limit=200`, { signal: controller.signal })
+      .then(async (response) => {
+        const body = await response.json()
+        if (!response.ok) throw new Error(body.error || 'No fue posible consultar los expedientes locales.')
+        setRecords(body.data)
+      })
+      .catch((cause) => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Error de consulta local.') })
+      .finally(() => { if (!controller.signal.aborted) setLoadingRecords(false) })
+    return () => controller.abort()
+  }, [selected])
+
+  return <section className="panel page-panel">
+    <div className="page-actions"><div><p className="eyebrow">PostgreSQL local</p><h2>Datos locales de prueba</h2><p className="muted">Vista de solo lectura, limitada a 200 mascotas. La pantalla principal todavía usa Supabase.</p></div></div>
+    {error && <p className="form-error" role="alert">{error}</p>}
+    {loading ? <p>Cargando datos locales…</p> : pets.length === 0 ? <p>No hay mascotas en PostgreSQL local.</p> : <div className="table-wrap responsive-table"><table><thead><tr><th>Mascota</th><th>Tutor</th><th>Especie</th><th>Estado</th><th>Acción</th></tr></thead><tbody>{pets.map((pet) => <tr key={pet.id}><td>{pet.name}</td><td>{pet.guardian_name}</td><td>{pet.species}</td><td>{pet.status}</td><td><button className="text-button" onClick={() => { setError(''); setSelected(pet) }}>Ver expedientes</button></td></tr>)}</tbody></table></div>}
+    {selected && <div><h3>{selected.name}</h3><p>Tutor: {selected.guardian_name} · Fecha de nacimiento: {selected.birth_date || '—'}</p><h4>Expedientes locales</h4>{loadingRecords ? <p>Cargando expedientes…</p> : records.length ? records.map((record) => <p key={record.id}>{formatDate(record.occurred_at, true)} · {record.provisional_diagnosis || 'Sin diagnóstico'} · {record.treatment || 'Sin tratamiento'}</p>) : <p>Sin expedientes registrados.</p>}</div>}
+  </section>
+}
+
 function Workspace({ session, onSignOut }: { session: Session; onSignOut: () => Promise<void> }) {
   const workspaceStorageKey = `accion-animal:workspace:${session.user.id}`
   const restoredWorkspace = useMemo(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(workspaceStorageKey) || '{}') as { view?: unknown; search?: unknown; selectedPetId?: unknown; expandedPetId?: unknown }
       return {
-        view: saved.view === 'pets' || saved.view === 'inactive-pets' || saved.view === 'users' ? saved.view : 'dashboard' as View,
+        view: saved.view === 'pets' || saved.view === 'inactive-pets' || saved.view === 'local-preview' || saved.view === 'users' ? saved.view : 'dashboard' as View,
         search: typeof saved.search === 'string' ? saved.search : '',
         selectedPetId: typeof saved.selectedPetId === 'string' ? saved.selectedPetId : typeof saved.expandedPetId === 'string' ? saved.expandedPetId : null,
       }
@@ -632,6 +678,8 @@ function Workspace({ session, onSignOut }: { session: Session; onSignOut: () => 
         <div className="content">
           {error && <div className="alert error"><strong>No se pudo cargar toda la información.</strong><span>{error}</span></div>}
           {notice && <div className="alert success" role="status"><ShieldCheck size={18} /><span>{notice}</span></div>}
+
+          {view === 'local-preview' && <LocalPreview />}
 
           {view === 'dashboard' && (
             <>
