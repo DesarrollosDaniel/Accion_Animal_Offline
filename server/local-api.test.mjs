@@ -103,6 +103,8 @@ test('no conecta si falta la contraseña y limita usuario, host y nombre de base
   const pool = createLocalPool({ AA_DB_PASSWORD: 'x', AA_DB_NAME: 'accion_animal_dev' })
   assert.equal(pool.options.user, 'aa_local_app')
   assert.equal(pool.options.host, '127.0.0.1')
+  assert.equal(pool.options.types.getTypeParser(1082, 'text')('2022-05-10'), '2022-05-10')
+  assert.equal(pool.options.types.getTypeParser(1700, 'text')('12.500'), 12.5)
   await pool.end()
 })
 

@@ -1,4 +1,4 @@
-import { Pool } from 'pg'
+import { Pool, types } from 'pg'
 import {
   createClinicalRecord, createPetChild, createPetWithRelated, deleteLeafResource,
   LocalApiError, readJsonBody, registerClinicalFile, updateClinicalRecord,
@@ -54,6 +54,13 @@ export function createLocalPool(env = process.env) {
   return new Pool({
     host: '127.0.0.1', port, database, user: 'aa_local_app', password: env.AA_DB_PASSWORD,
     max: 5, connectionTimeoutMillis: 3000, idleTimeoutMillis: 10000,
+    types: {
+      getTypeParser(oid, format) {
+        if (format === 'text' && oid === 1082) return (value) => value
+        if (format === 'text' && oid === 1700) return Number
+        return types.getTypeParser(oid, format)
+      },
+    },
   })
 }
 
