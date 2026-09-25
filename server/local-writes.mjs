@@ -460,9 +460,9 @@ async function updateWithOutbox(pool, actorId, table, id, body) {
     }
     values.push(actorId)
     if (statusPlaceholder) {
-      assignments.push(`deactivated_at = CASE WHEN ${statusPlaceholder} = 'active' THEN NULL
+      assignments.push(`deactivated_at = CASE WHEN ${statusPlaceholder}::aa_local.pet_status = 'active' THEN NULL
         WHEN status = 'active' THEN now() ELSE deactivated_at END`)
-      assignments.push(`deactivated_by = CASE WHEN ${statusPlaceholder} = 'active' THEN NULL
+      assignments.push(`deactivated_by = CASE WHEN ${statusPlaceholder}::aa_local.pet_status = 'active' THEN NULL
         WHEN status = 'active' THEN $${values.length} ELSE deactivated_by END`)
     }
     assignments.push(`updated_by = $${values.length}`)

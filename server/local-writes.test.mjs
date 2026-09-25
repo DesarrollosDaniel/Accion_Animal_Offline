@@ -227,7 +227,7 @@ test('editar estado y nombre genera UPDATE pendiente con versión nueva', async 
     expected_version: '2', changes: { status: 'inactive', name: 'Luna II' },
   })
   const update = db.calls.find((call) => call.sql.startsWith('UPDATE aa_local.pets'))
-  assert.match(update.sql, /deactivated_at = CASE/)
+  assert.match(update.sql, /deactivated_at = CASE WHEN \$3::aa_local\.pet_status = 'active'/)
   assert.match(update.sql, /deactivated_by = CASE[^]*\$5/)
   assert.deepEqual(update.values, [petId, '2', 'inactive', 'Luna II', actorId])
   const operation = db.calls.find((call) => call.sql.includes('INSERT INTO aa_local.sync_operations'))
