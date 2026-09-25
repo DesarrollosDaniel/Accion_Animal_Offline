@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { assertTestEnvironment } from '../scripts/test-environment.mjs'
+import { createLocalPool, handleLocalApi, saveVerifiedProfile } from './local-api.mjs'
 
 assertTestEnvironment()
 
@@ -88,12 +89,13 @@ async function validateSupabaseUser(accessToken) {
     const user = await userResponse.json()
     const profileUrl = new URL(`${supabaseUrl}/rest/v1/profiles`)
     profileUrl.searchParams.set('id', `eq.${user.id}`)
-    profileUrl.searchParams.set('select', 'id,role,is_active')
+    profileUrl.searchParams.set('select', 'id,display_name,role,is_active')
     const profileResponse = await fetch(profileUrl, { headers, signal })
     if (!profileResponse.ok) return null
     const [profile] = await profileResponse.json()
-    if (!profile?.is_active || !['owner', 'veterinarian', 'reception'].includes(profile.role)) return null
-    return { userId: user.id, role: profile.role }
+    if (!profile?.is_active || !['owner', 'veterinarian', 'reception'].includes(profile.role)
+      || typeof profile.display_name !== 'string' || !profile.display_name.trim()) return null
+    return { userId: user.id, role: profile.role, displayName: profile.display_name }
   } catch (error) {
     throw Object.assign(new Error('SUPABASE_UNAVAILABLE'), { cause: error })
   }
@@ -150,7 +152,7 @@ async function serveFile(req, res, filePath, options = {}) {
   createReadStream(filePath).pipe(res)
 }
 
-async function handleSession(req, res) {
+async function handleSession(req, res, localPool) {
   if (!requireSameOrigin(req, res)) return
   if (req.method === 'DELETE') {
     const id = parseCookies(req)[cookieName]
@@ -163,6 +165,7 @@ async function handleSession(req, res) {
   const accessToken = authorization.slice(7)
   const user = await validateSupabaseUser(accessToken)
   if (!user) return json(res, 401, { error: 'La sesión o el perfil no son válidos.' })
+  await saveVerifiedProfile(localPool, user)
   const id = randomBytes(32).toString('base64url')
   const expiresAt = Date.now() + 55 * 60 * 1000
   sessions.set(id, { ...user, expiresAt })
@@ -248,6 +251,20 @@ async function start() {
   if (!Number.isFinite(maxUploadBytes) || maxUploadBytes < 1) throw new Error('AA_MAX_UPLOAD_BYTES no es válido.')
   await access(path.join(distRoot, 'index.html'), constants.R_OK)
   const storageRoot = await realpath(path.resolve(projectRoot, storageSetting))
+  const localPool = createLocalPool()
+  if (localPool) {
+    try {
+      const { rows } = await localPool.query(
+        "SELECT current_user AS db_user, current_database() AS db_name, to_regclass('aa_local.pets') AS pets_table",
+      )
+      if (rows[0]?.db_user !== 'aa_local_app' || !rows[0]?.pets_table) {
+        throw new Error('La conexión local no usa la cuenta limitada o falta el esquema aa_local.')
+      }
+    } catch (error) {
+      await localPool.end()
+      throw error
+    }
+  }
 
   setInterval(() => {
     const now = Date.now()
@@ -259,9 +276,23 @@ async function start() {
       const rawPathname = (req.url || '/').split('?', 1)[0]
       const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
       if (url.pathname === '/api/health') {
-        return json(res, 200, { ok: true, storage: 'available', mode: 'local' })
+        let database = 'not-configured'
+        if (localPool) {
+          try {
+            await localPool.query('SELECT 1')
+            database = 'available'
+          } catch {
+            database = 'unavailable'
+          }
+        }
+        return json(res, database === 'unavailable' ? 503 : 200, {
+          ok: database !== 'unavailable', storage: 'available', database, mode: 'local',
+        })
       }
-      if (url.pathname === '/api/local-session') return await handleSession(req, res)
+      if (url.pathname === '/api/local-session') return await handleSession(req, res, localPool)
+      if (url.pathname.startsWith('/api/local/')) {
+        return await handleLocalApi(req, res, url, localPool, currentSession, storageRoot)
+      }
       if (rawPathname.startsWith('/uploaded/')) {
         return await handleUploaded(req, res, { ...url, pathname: rawPathname }, storageRoot)
       }
