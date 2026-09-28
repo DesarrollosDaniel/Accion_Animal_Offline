@@ -153,8 +153,13 @@ test('verifica el archivo físico y guarda checksum y operación en la misma tra
       if (sql.includes('FOR KEY SHARE')) return { rows: [{ id: '66666666-6666-4666-8666-666666666666' }] }
       if (sql.includes("entity_table = 'clinical_records'")) return { rows: [{ id: operationId }] }
       if (sql.includes('INSERT INTO aa_local.clinical_files')) {
-        return { rows: [{ id: '99999999-9999-4999-8999-999999999999', row_version: 1 }] }
+        const previousInsert = calls.filter((call) => call.sql.includes('INSERT INTO aa_local.clinical_files')).length > 1
+        return { rows: previousInsert ? [] : [{ id: '99999999-9999-4999-8999-999999999999', row_version: 1 }] }
       }
+      if (sql.startsWith('SELECT * FROM aa_local.clinical_files')) return { rows: [{
+        id: '99999999-9999-4999-8999-999999999999', row_version: 1, ...metadata,
+        checksum_sha256: createHash('sha256').update('hola').digest('hex'),
+      }] }
       if (sql.includes('INSERT INTO aa_local.sync_operations')) return { rows: [{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }] }
       return { rows: [] }
     },
@@ -178,6 +183,9 @@ test('verifica el archivo físico y guarda checksum y operación en la misma tra
     const operation = calls.find((call) => call.sql.includes('INSERT INTO aa_local.sync_operations'))
     assert.equal(operation.values[5], operationId)
     assert.equal(calls.at(-1).sql, 'COMMIT')
+    await registerClinicalFile(pool, actorId, '66666666-6666-4666-8666-666666666666', metadata, root)
+    assert.equal(calls.filter((call) => call.sql.includes('INSERT INTO aa_local.sync_operations')).length, 1)
+    await assert.rejects(registerClinicalFile(pool, actorId, '66666666-6666-4666-8666-666666666666', { ...metadata, original_name: 'otro.txt' }, root), /otros metadatos/)
   } finally {
     await unlink(file)
     await rmdir(second)
@@ -187,12 +195,71 @@ test('verifica el archivo físico y guarda checksum y operación en la misma tra
 })
 
 test('actualizaciones exigen versión y rechazan campos reservados', () => {
+  assert.throws(() => validatePatch({ expected_version: '1', changes: { photo_path: 'uploaded/mascotas/../foto.jpg' } }, 'pets'), /fotografía/)
   assert.throws(() => validatePatch({ expected_version: 0, changes: { name: 'Luna' } }, 'pets'), /expected_version/)
   assert.throws(() => validatePatch({ expected_version: '1', changes: { row_version: 8 } }, 'pets'), /no permitido/)
   assert.throws(() => validatePatch({ expected_version: '1', changes: { pet_id: petId } }, 'clinical_records'), /no permitido/)
   assert.deepEqual(validatePatch({ expected_version: '2', changes: { name: 'Luna II' } }, 'pets'), {
     expectedVersion: '2', changes: { name: 'Luna II' },
   })
+})
+
+test('eliminar una mascota guarda lápidas de sus hijos y revierte toda la transacción si falla la cola', async () => {
+  async function run(fail = false, stale = false) {
+    const calls = []
+    const client = {
+      async query(sql, values) {
+        calls.push({ sql, values })
+        if (sql.startsWith('SELECT * FROM aa_local.pets')) return { rows: [{ id: petId, row_version: '2' }] }
+        if (sql.startsWith('SELECT * FROM aa_local.clinical_files')) return { rows: [{ id: 'file-id', row_version: '4', object_path: 'uploaded/archivo.pdf' }] }
+        if (sql.startsWith('SELECT * FROM aa_local.clinical_records')) return { rows: [{ id: 'record-id', row_version: '3' }] }
+        if (sql.includes('ORDER BY source_version DESC')) return { rows: [{ id: operationId }] }
+        if (sql.includes('INSERT INTO aa_local.sync_operations')) {
+          if (fail && values[0] === 'pets') throw new Error('outbox failed')
+          return { rows: [{ id: `delete-${values[0]}` }] }
+        }
+        return { rows: [] }
+      },
+      release() {},
+    }
+    const result = deleteLeafResource({ async connect() { return client } }, actorId, 'pets', petId, { expected_version: stale ? '1' : '2' })
+    if (fail || stale) await assert.rejects(result, fail ? /outbox failed/ : /vuelve a cargarlo/)
+    else await result
+    return calls
+  }
+  const calls = await run()
+  const operations = calls.filter((call) => call.sql.includes('INSERT INTO aa_local.sync_operations'))
+  assert.deepEqual(operations.map((call) => call.values[0]), ['clinical_files', 'clinical_records', 'pets'])
+  assert.equal(operations[0].values[4].object_path, 'uploaded/archivo.pdf')
+  assert.deepEqual(operations[2].values[4].cascade_delete_operations, ['delete-clinical_files', 'delete-clinical_records'])
+  assert.equal(operations[2].values[5], operationId)
+  assert.equal(calls.at(-1).sql, 'COMMIT')
+  const failed = await run(true)
+  assert.equal(failed.at(-1).sql, 'ROLLBACK')
+  assert.equal(failed.some((call) => call.sql === 'COMMIT'), false)
+  const stale = await run(false, true)
+  assert.equal(stale.some((call) => call.sql.startsWith('DELETE')), false)
+})
+
+test('eliminar un expediente conserva medicamentos y registra la desvinculación', async () => {
+  const calls = []
+  const client = {
+    async query(sql, values) {
+      calls.push({ sql, values })
+      if (sql.startsWith('SELECT * FROM aa_local.clinical_records')) return { rows: [{ id: petId, row_version: '1' }] }
+      if (sql.startsWith('UPDATE aa_local.medications')) return { rows: [{ id: 'medication-id', row_version: '2', clinical_record_id: null }] }
+      if (sql.includes('ORDER BY source_version DESC')) return { rows: [{ id: operationId }] }
+      if (sql.includes('INSERT INTO aa_local.sync_operations')) return { rows: [{ id: `operation-${values[0]}` }] }
+      return { rows: [] }
+    },
+    release() {},
+  }
+  await deleteLeafResource({ async connect() { return client } }, actorId, 'clinical_records', petId, { expected_version: '1' })
+  const operations = calls.filter((call) => call.sql.includes('INSERT INTO aa_local.sync_operations'))
+  assert.equal(operations[0].values[6], 'UPDATE')
+  assert.equal(operations[0].values[4].clinical_record_id, null)
+  assert.deepEqual(operations[1].values[4].cascade_delete_operations, ['operation-medications'])
+  assert.equal(calls.some((call) => call.sql.startsWith('DELETE FROM aa_local.medications')), false)
 })
 
 function updateDatabase({ found = true, exists = true, failOperation = false } = {}) {
@@ -203,6 +270,7 @@ function updateDatabase({ found = true, exists = true, failOperation = false } =
       return {
         async query(sql, values) {
           calls.push({ sql, values })
+          if (sql.startsWith('SELECT * FROM aa_local.')) return { rows: exists ? [{ id: petId, row_version: 2, name: 'Luna' }] : [] }
           if (sql.startsWith('UPDATE aa_local.')) {
             return { rows: found ? [{ id: petId, row_version: 3, name: 'Luna II' }] : [] }
           }
@@ -235,6 +303,7 @@ test('editar estado y nombre genera UPDATE pendiente con versión nueva', async 
   assert.equal(operation.values[2], 3)
   assert.equal(operation.values[5], operationId)
   assert.equal(operation.values[6], 'UPDATE')
+  assert.equal(operation.values[4]._sync_base.name, 'Luna')
   assert.equal(db.calls.at(-1).sql, 'COMMIT')
   assert.equal(db.wasReleased(), true)
 })

@@ -126,6 +126,12 @@ function parsePetFields(input, allowStatus = false) {
       pet[key] = value
     } else if (key === 'sex' && ['male', 'female', 'unknown', null].includes(value)) {
       pet.sex = value
+    } else if (key === 'photo_path' && allowStatus) {
+      if (typeof value !== 'string' || !/^uploaded\/[\w/-]+\/[^\\:\0]+$/.test(value)
+        || value.split('/').some((part) => part === '..' || part === '.')) {
+        throw new LocalApiError(400, 'Ruta de fotografía inválida.')
+      }
+      pet.photo_path = value
     } else if (key === 'status' && allowStatus && ['active', 'inactive', 'deceased'].includes(value)) {
       pet.status = value
     } else {
@@ -316,13 +322,13 @@ export async function readJsonBody(req) {
   }
 }
 
-async function addOperation(client, table, row, actorId, dependsOn = null, action = 'INSERT') {
+async function addOperation(client, table, row, actorId, dependsOn = null, action = 'INSERT', baseRow = null) {
   if (!['INSERT', 'UPDATE', 'DELETE'].includes(action)) throw new Error('Acción de sincronización inválida.')
   const { rows } = await client.query(
     `INSERT INTO aa_local.sync_operations
        (entity_table, entity_id, action, source_version, actor_id, payload, depends_on_operation_id)
      VALUES ($1, $2, $7, $3, $4, $5, $6) RETURNING id`,
-    [table, row.id, row.row_version, actorId, row, dependsOn, action],
+    [table, row.id, row.row_version, actorId, baseRow ? { ...row, _sync_base: baseRow } : row, dependsOn, action],
   )
   return rows[0].id
 }
@@ -427,10 +433,22 @@ export async function registerClinicalFile(pool, actorId, recordId, body, storag
     const { rows } = await client.query(
       `INSERT INTO aa_local.clinical_files
          (clinical_record_id, kind, object_path, original_name, mime_type, size_bytes, checksum_sha256, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (clinical_record_id, object_path) DO NOTHING RETURNING *`,
       [recordId, metadata.kind, metadata.object_path, metadata.original_name,
         metadata.mime_type, metadata.size_bytes, checksum, actorId],
     )
+    if (!rows[0]) {
+      const existing = await client.query('SELECT * FROM aa_local.clinical_files WHERE clinical_record_id = $1 AND object_path = $2', [recordId, metadata.object_path])
+      const file = existing.rows[0]
+      if (!file || file.checksum_sha256 !== checksum || file.kind !== metadata.kind
+        || file.original_name !== metadata.original_name || file.mime_type !== metadata.mime_type
+        || Number(file.size_bytes) !== metadata.size_bytes) {
+        throw new LocalApiError(409, 'La ruta ya está registrada con otros metadatos.')
+      }
+      await client.query('COMMIT')
+      return file
+    }
     const created = rows[0]
     await addOperation(client, 'clinical_files', created, actorId, parentOperation.rows[0]?.id)
     await client.query('COMMIT')
@@ -449,6 +467,7 @@ async function updateWithOutbox(pool, actorId, table, id, body) {
   try {
     await client.query('BEGIN')
     await client.query("SELECT set_config('aa.actor_id', $1, true)", [actorId])
+    const original = await client.query(`SELECT * FROM aa_local.${table} WHERE id = $1 FOR UPDATE`, [id])
     const assignments = []
     const values = [id, expectedVersion]
     let statusPlaceholder = null
@@ -480,7 +499,7 @@ async function updateWithOutbox(pool, actorId, table, id, body) {
        ORDER BY source_version DESC LIMIT 1`, [table, id],
     )
     const updated = result.rows[0]
-    await addOperation(client, table, updated, actorId, previous.rows[0]?.id, 'UPDATE')
+    await addOperation(client, table, updated, actorId, previous.rows[0]?.id, 'UPDATE', original.rows[0])
     await client.query('COMMIT')
     return updated
   } catch (error) {
@@ -491,7 +510,25 @@ async function updateWithOutbox(pool, actorId, table, id, body) {
   }
 }
 
-export function updatePet(pool, actorId, petId, body) {
+export async function updatePet(pool, actorId, petId, body, storageRoot) {
+  const { changes } = validatePatch(body, 'pets')
+  if (changes.photo_path) {
+    if (!storageRoot) throw new LocalApiError(503, 'El almacenamiento no está configurado.')
+    const parts = changes.photo_path.slice('uploaded/'.length).split('/')
+    if (!['.bmp', '.gif', '.jfif', '.jpeg', '.jpg', '.png', '.webp'].includes(path.extname(parts.at(-1)).toLowerCase())) {
+      throw new LocalApiError(400, 'La fotografía debe ser una imagen permitida.')
+    }
+    let fileStat
+    try { fileStat = await stat(path.join(storageRoot, ...parts)) } catch (error) {
+      if (error.code === 'ENOENT') throw new LocalApiError(404, 'La fotografía no existe.')
+      throw error
+    }
+    const resolved = await realpath(path.join(storageRoot, ...parts))
+    const relative = path.relative(storageRoot, resolved)
+    if (!fileStat.isFile() || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new LocalApiError(400, 'La fotografía está fuera del almacenamiento local.')
+    }
+  }
   return updateWithOutbox(pool, actorId, 'pets', petId, body)
 }
 
@@ -543,7 +580,7 @@ export function updateWeightRecord(pool, actorId, weightId, body) {
 }
 
 const deletableResources = new Set([
-  'vaccinations', 'pet_notes', 'weight_records', 'clinical_files',
+  'vaccinations', 'pet_notes', 'weight_records', 'clinical_files', 'clinical_records', 'pets',
 ])
 
 export async function deleteLeafResource(pool, actorId, resource, entityId, body) {
@@ -564,6 +601,33 @@ export async function deleteLeafResource(pool, actorId, resource, entityId, body
     if (String(current.row_version) !== expectedVersion) {
       throw new LocalApiError(409, 'El registro cambió; vuelve a cargarlo antes de eliminar.')
     }
+    const cascadeOperations = []
+    async function removeRows(table, condition, values) {
+      const children = await client.query(`SELECT * FROM aa_local.${table} WHERE ${condition} ORDER BY id FOR UPDATE`, values)
+      for (const child of children.rows) {
+        const prior = await client.query(`SELECT id FROM aa_local.sync_operations WHERE entity_table = $1 AND entity_id = $2 ORDER BY source_version DESC LIMIT 1`, [table, child.id])
+        await client.query(`DELETE FROM aa_local.${table} WHERE id = $1`, [child.id])
+        cascadeOperations.push(await addOperation(client, table, {
+          ...child, row_version: String(BigInt(child.row_version) + 1n), deleted_at: new Date().toISOString(),
+        }, actorId, prior.rows[0]?.id, 'DELETE'))
+      }
+    }
+    if (resource === 'pets') {
+      // Lock records before their files so concurrent file registration cannot escape the snapshot.
+      await client.query('SELECT id FROM aa_local.clinical_records WHERE pet_id = $1 ORDER BY id FOR UPDATE', [entityId])
+      await removeRows('clinical_files', 'clinical_record_id IN (SELECT id FROM aa_local.clinical_records WHERE pet_id = $1)', [entityId])
+      for (const table of ['medications', 'clinical_records', 'vaccinations', 'allergies', 'pet_notes', 'weight_records']) {
+        await removeRows(table, 'pet_id = $1', [entityId])
+      }
+    } else if (resource === 'clinical_records') {
+      await removeRows('clinical_files', 'clinical_record_id = $1', [entityId])
+      const originalMedications = await client.query('SELECT * FROM aa_local.medications WHERE clinical_record_id = $1 ORDER BY id FOR UPDATE', [entityId])
+      const medications = await client.query('UPDATE aa_local.medications SET clinical_record_id = NULL, updated_by = $2 WHERE clinical_record_id = $1 RETURNING *', [entityId, actorId])
+      for (const medication of medications.rows) {
+        const prior = await client.query('SELECT id FROM aa_local.sync_operations WHERE entity_table = $1 AND entity_id = $2 ORDER BY source_version DESC LIMIT 1', ['medications', medication.id])
+        cascadeOperations.push(await addOperation(client, 'medications', medication, actorId, prior.rows[0]?.id, 'UPDATE', originalMedications.rows.find((row) => row.id === medication.id)))
+      }
+    }
     const previous = await client.query(
       `SELECT id FROM aa_local.sync_operations
        WHERE entity_table = $1 AND entity_id = $2
@@ -573,6 +637,7 @@ export async function deleteLeafResource(pool, actorId, resource, entityId, body
     const tombstone = {
       ...current, row_version: String(BigInt(current.row_version) + 1n),
       deleted_at: new Date().toISOString(),
+      ...(cascadeOperations.length ? { cascade_delete_operations: cascadeOperations } : {}),
     }
     await addOperation(client, resource, tombstone, actorId, previous.rows[0]?.id, 'DELETE')
     await client.query('COMMIT')

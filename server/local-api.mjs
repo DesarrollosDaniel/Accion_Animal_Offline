@@ -21,6 +21,7 @@ const childWriteTables = new Map([
 ])
 
 const deletableTables = new Map([
+  ['pets', 'pets'], ['clinical-records', 'clinical_records'],
   ['vaccinations', 'vaccinations'], ['pet-notes', 'pet_notes'],
   ['weight-records', 'weight_records'], ['clinical-files', 'clinical_files'],
 ])
@@ -52,7 +53,7 @@ export function createLocalPool(env = process.env) {
   const database = env.AA_DB_NAME || 'accion_animal_dev'
   if (database !== 'accion_animal_dev') throw new Error('AA_DB_NAME debe ser accion_animal_dev en este entorno de pruebas.')
   return new Pool({
-    host: '127.0.0.1', port, database, user: 'aa_local_app', password: env.AA_DB_PASSWORD,
+    host: '127.0.0.1', ssl: false, port, database, user: 'aa_local_app', password: env.AA_DB_PASSWORD,
     max: 5, connectionTimeoutMillis: 3000, idleTimeoutMillis: 10000,
     types: {
       getTypeParser(oid, format) {
@@ -129,6 +130,10 @@ export async function handleLocalApi(req, res, url, pool, currentSession, storag
       // Los cambios requieren el encabezado Origin del mismo servidor.
     }
     if (!sameOrigin) return reply(res, 403, { error: 'Solicitud rechazada por seguridad.' })
+    if (req.method === 'DELETE' && ['pets', 'clinical_records'].includes(deleteTable)
+      && (!session.verifiedAt || Date.now() - session.verifiedAt > 5 * 60 * 1000)) {
+      return reply(res, 403, { error: 'Confirma tu contraseña antes de eliminar.' })
+    }
     try {
       const body = await readJsonBody(req)
       let saved
@@ -137,7 +142,7 @@ export async function handleLocalApi(req, res, url, pool, currentSession, storag
       else if (isRecordCreation) saved = await createClinicalRecord(pool, session.userId, parts[3], body)
       else if (isFileCreation) saved = await registerClinicalFile(pool, session.userId, parts[3], body, storageRoot)
       else if (childCreateTable) saved = await createPetChild(pool, session.userId, parts[3], childCreateTable, body)
-      else if (isPetUpdate) saved = await updatePet(pool, session.userId, parts[3], body)
+      else if (isPetUpdate) saved = await updatePet(pool, session.userId, parts[3], body, storageRoot)
       else if (isRecordUpdate) saved = await updateClinicalRecord(pool, session.userId, parts[3], body)
       else if (childUpdateTable === 'vaccinations') saved = await updateVaccination(pool, session.userId, parts[3], body)
       else if (childUpdateTable === 'pet_notes') saved = await updatePetNote(pool, session.userId, parts[3], body)
@@ -159,6 +164,16 @@ export async function handleLocalApi(req, res, url, pool, currentSession, storag
   if (!page) return reply(res, 400, { error: 'Paginación inválida.' })
   const parts = url.pathname.split('/').filter(Boolean)
   if (parts[0] !== 'api' || parts[1] !== 'local') return reply(res, 404, { error: 'Ruta no encontrada.' })
+
+  if (parts.length === 3 && parts[2] === 'profile') {
+    const { rows } = await pool.query('SELECT id, display_name, role, is_active, created_at FROM aa_local.profiles WHERE id = $1', [session.userId])
+    return reply(res, 200, { data: rows[0] })
+  }
+  if (parts.length === 3 && parts[2] === 'profiles') {
+    if (profile.role !== 'owner') return reply(res, 403, { error: 'Solo el dueño puede consultar usuarios.' })
+    const { rows } = await pool.query('SELECT id, display_name, role, is_active, created_at FROM aa_local.profiles ORDER BY created_at LIMIT $1 OFFSET $2', [page.limit, page.offset])
+    return reply(res, 200, { data: rows })
+  }
 
   if (parts.length === 3 && parts[2] === 'summary') {
     const { rows } = await pool.query(`

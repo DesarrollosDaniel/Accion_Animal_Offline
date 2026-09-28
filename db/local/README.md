@@ -47,11 +47,9 @@ conserva datos ficticios:
 & 'C:\Program Files\PostgreSQL\18\bin\psql.exe' -X -h 127.0.0.1 -p 5432 -U postgres -d accion_animal_dev -v ON_ERROR_STOP=1 -f 'db/local/tests/sync_foundation.test.sql'
 ```
 
-Esta etapa todavía no conecta React o Node.js a `aa_local` ni activa el
-trabajador de sincronización. La API validará identidad y permisos, y guardará
-cada cambio junto con su operación pendiente dentro de una transacción. Los
-roles de base de datos no sustituyen esa autorización. La aplicación actual
-sigue utilizando Supabase directamente para los datos clínicos.
+La API guarda cada cambio junto con su operación pendiente dentro de una
+transacción. Los roles de base de datos no sustituyen su autorización.
+El trabajador de envío se prepara en el paso 4.5; requiere su cuenta remota.
 
 ## Paso 4.3 en curso: API local
 
@@ -60,15 +58,14 @@ mascotas, expedientes, vacunas, medicamentos, alergias, notas, pesos y metadatos
 de archivos. Por ejemplo, `/api/local/pets` y
 `/api/local/pets/{uuid}/clinical-records`. Requieren la sesión HTTP actual y
 un perfil activo con el mismo rol en `aa_local.profiles`. Las consultas usan
-parámetros SQL y páginas de hasta 200 filas. Todavía no existen rutas de
-escritura para todos los recursos ni se ha cambiado React para usar estas
-consultas.
+parámetros SQL y páginas de hasta 200 filas. React utiliza estas consultas
+para las listas y la ficha clínica.
 
 `POST /api/local/pets` acepta una mascota junto con sus vacunas y su nota
 inicial. Solo dueño y veterinaria pueden utilizarlo. Registra mascota, datos
 relacionados y operaciones pendientes de sincronización dentro de una sola
-transacción; si falla cualquier parte, deshace el alta. Esta ruta todavía no
-está conectada a la pantalla de React.
+transacción; si falla cualquier parte, deshace el alta. React utiliza esta
+ruta para crear mascotas.
 
 `POST /api/local/pets/{uuid}/clinical-records` acepta un expediente y un peso
 opcional. Verifica que la mascota exista, registra auditoría y crea las
@@ -78,8 +75,8 @@ el peso, deshace también el expediente.
 `POST /api/local/clinical-records/{uuid}/files` registra los metadatos de un
 archivo ya cargado en `/uploaded/...`. Verifica ruta, existencia, tamaño y
 SHA-256 del archivo físico antes de guardar el registro y su operación
-pendiente. No borra el archivo físico si falla el registro; la interfaz futura
-debe limpiar esa carga o permitir reintentar el registro.
+pendiente. No borra el archivo físico si falla el registro; la interfaz
+permite reintentar el registro.
 
 `PATCH /api/local/pets/{uuid}` y `PATCH /api/local/clinical-records/{uuid}`
 editan campos permitidos. El cuerpo incluye `expected_version` (la
@@ -96,7 +93,7 @@ metadatos clínicos (`/api/local/clinical-files/{uuid}`) exige
 `expected_version` y guarda una operación pendiente de eliminación. Al borrar
 metadatos clínicos, el archivo físico permanece en `uploaded` hasta poder
 confirmar su eliminación remota y revisar si otra ficha lo usa. La interfaz
-aún no utiliza estas rutas; faltan las eliminaciones de expedientes y mascotas.
+utiliza estas rutas, incluidas las eliminaciones de expedientes y mascotas.
 
 La conexión usa exclusivamente `127.0.0.1`, `accion_animal_dev` y el rol
 limitado `aa_local_app`; nunca usa la cuenta `postgres` en el servidor de la
@@ -110,7 +107,7 @@ En la sesión PowerShell donde se iniciará el servidor, activar la conexión si
 mostrar la contraseña:
 
 ```powershell
-$env:AA_DB_PASSWORD = Read-Host 'Contraseña de aa_local_app' -MaskInput
+$env:AA_DB_PASSWORD = [System.Net.NetworkCredential]::new('', (Read-Host 'Contraseña de aa_local_app' -AsSecureString)).Password
 npm.cmd run start:local
 ```
 
@@ -119,8 +116,8 @@ El arranque comprueba la cuenta limitada y el esquema. `/api/health` informa
 continúa funcionando y las rutas `/api/local/` responden `503` tras autenticar
 al usuario. Al establecer una sesión con Supabase, el servidor copia o
 actualiza en PostgreSQL el perfil activo verificado (UUID, nombre y rol). Esto
-habilita la API local para ese usuario; todavía requiere internet para iniciar
-sesión y no copia los datos clínicos. Reiniciar el servidor después de cambiar
+habilita la API local para ese usuario; el acceso sin internet se describe en
+el paso 4.4 y no copia los datos clínicos. Reiniciar el servidor después de cambiar
 este código y volver a iniciar sesión para registrar el perfil local.
 
 Verificar las rutas sin conectarse a la base:
@@ -144,7 +141,182 @@ para comprobar los metadatos: no crea ningún archivo en `uploaded`. La prueba
 de código que verifica un archivo físico lo crea en una carpeta temporal y lo
 borra al terminar.
 
-Estas rutas aún dependen de la sesión Supabase y no son acceso sin internet.
+Estas rutas usan la sesión HTTP del servidor local.
+
+La pantalla principal consulta el resumen, la lista y la búsqueda en la API
+local. La ficha completa, las vacunas, notas, pesos, consultas, foto principal
+y adjuntos escriben en PostgreSQL local. La ficha se descarga al abrir una
+mascota; el historial usa páginas de 25 consultas y los adjuntos se consultan
+al desplegar cada expediente, en páginas de 50. No se añaden dependencias.
+La administración de usuarios sigue usando Supabase; el ingreso tiene respaldo local.
+Para arrancar este
+servidor, cargar `AA_DB_PASSWORD` de `aa_local_app` en la misma terminal antes
+de `npm.cmd run start:local`. El arranque automático, HTTPS y los respaldos en
+la PC definitiva siguen pendientes.
+
+`DELETE /api/local/pets/{uuid}` y `/clinical-records/{uuid}` exigen
+`expected_version`. Dentro de una transacción bloquean el registro, eliminan
+los hijos y registran sus lápidas en la cola. El expediente desvincula los
+medicamentos sin borrarlos. La operación de eliminación padre incluye
+`cascade_delete_operations` con los UUID de las operaciones de hijos y de
+desvinculación; el futuro trabajador debe confirmar **todas** esas operaciones
+y `depends_on_operation_id` antes de enviar la eliminación padre.
+
+Eliminar un adjunto quita sus metadatos de la ficha. Los archivos físicos y
+las fotografías anteriores se conservan hasta confirmar sincronización y
+revisar referencias compartidas; el navegador no puede borrarlos directamente.
+El registro de un adjunto admite reintentos con la misma ruta y metadatos,
+sin duplicar registros ni operaciones. Un fallo al cargar adjuntos conserva
+el expediente y permite reintentar los archivos pendientes. Si no se pudo
+confirmar el alta de una consulta, el formulario exige revisar el historial
+antes de volver a crearla para evitar duplicados. Las eliminaciones de mascota
+y expediente reconfirman la contraseña local antes de enviar la eliminación.
+
+## Paso 4.4: acceso sin internet
+
+Aplicar como `postgres` en `accion_animal_dev` y comprobar:
+
+```powershell
+& 'C:\Program Files\PostgreSQL\18\bin\psql.exe' -X -h 127.0.0.1 -p 5432 -U postgres -d accion_animal_dev -v ON_ERROR_STOP=1 -f 'db/local/migrations/003_offline_auth.sql'
+& 'C:\Program Files\PostgreSQL\18\bin\psql.exe' -X -h 127.0.0.1 -p 5432 -U postgres -d accion_animal_dev -v ON_ERROR_STOP=1 -f 'db/local/tests/offline_auth.test.sql'
+```
+
+La prueba termina en `ROLLBACK`. La migración crea solamente la tabla privada
+`login_credentials`; no modifica Supabase ni las fichas. Reiniciar después el
+servidor en su terminal habitual con `AA_DB_PASSWORD` ya cargada.
+
+El primer ingreso verifica contraseña
+y perfil activo en Supabase. Guarda únicamente un hash scrypt con sal aleatoria,
+UUID y correo en PostgreSQL local. La validación caduca a los siete días;
+un nuevo ingreso con conexión la renueva. El acceso es automático: se intenta
+Supabase con un plazo de tres segundos. Si no logra contactar
+Auth, intenta las credenciales locales; un rechazo de contraseña en
+Supabase nunca activa ese respaldo. No se cachean claves inválidas.
+
+`POST /api/local-auth` crea una cookie aleatoria HttpOnly y SameSite Strict
+por ocho horas como máximo, acotada por la vigencia de la validación. Las
+sesiones viven en memoria; reiniciar el servidor exige ingresar de nuevo,
+pero conserva la comprobación de contraseña en PostgreSQL. No hay claves
+ni tokens persistidos en el navegador. Con HTTPS la cookie también es Secure.
+
+`GET /api/local-session` restaura la identidad desde la cookie. El resumen,
+la ficha y el perfil se consultan localmente. Los archivos y la API comprueban
+el perfil activo en cada solicitud. `POST /api/local-auth/verify` reconfirma
+la contraseña de la misma cuenta; el servidor exige una confirmación de menos
+de cinco minutos para eliminar mascotas o expedientes. Se limitan los intentos
+a cinco por correo y dirección en cinco minutos, sin añadir dependencias.
+
+**Límite conocido:** sin sincronización, una baja o cambio de rol remoto puede
+tardar hasta siete días en reflejarse si se usa acceso local. El trabajador de
+perfiles deberá reducir ese intervalo cuando haya conexión. La administración
+de cuentas sigue requiriendo un ingreso con internet; tras recargar la página,
+hay que ingresar de nuevo con internet para usarla. La sesión Supabase solo
+vive en memoria y no se renueva automáticamente; el acceso clínico es local.
+El envío de datos se describe en el paso 4.5. La recepción de cambios remotos
+y perfiles sigue pendiente. Los archivos físicos permanecen locales por diseño.
+
+Comprobaciones de código:
+
+```powershell
+node --test server/local-auth.test.mjs server/local-api.test.mjs server/local-writes.test.mjs
+npm.cmd run build
+```
+
+## Paso 4.5: envío local → Supabase de pruebas
+
+`server/local-sync.mjs` envía la cola mediante un proceso separado de la API.
+No modifica el código descargado por el navegador ni añade paquetes. Usa
+lotes de hasta 50 operaciones; `--watch` revisa cada 30 segundos y reconecta
+después de una caída. Los fallos temporales esperan entre 2 y 60 minutos.
+Solo una instancia puede tomar el bloqueo local. Esta etapa admite una sola
+PC que origina cambios, exclusivamente contra el proyecto de pruebas.
+
+La migración remota `20260926192506_offline_sync_receipts.sql` **ya fue aplicada
+al proyecto de pruebas**. Crea una cuenta limitada `aa_sync_worker`, sin LOGIN
+ni contraseña, y confirmaciones privadas e inmutables. Cada escritura y su
+confirmación se guardan en una sola transacción remota. Si se pierde la
+respuesta, el reintento consulta la confirmación y no repite la escritura.
+Las escrituras asumen el rol `authenticated`, conservan el autor de la
+operación y están sujetas a las políticas RLS existentes. Una cuenta remota
+inactiva o sin permiso clínico no puede enviar sus cambios pendientes.
+
+El trabajador espera la operación anterior y **todos** los hijos de una
+eliminación. Antes de eliminar un padre también comprueba que no tenga hijos
+nuevos en Supabase. No elimina archivos del disco. Fotos y documentos siguen
+en la PC; se envían sus metadatos, conforme al diseño de almacenamiento local.
+
+Las nuevas ediciones guardan su versión original en `_sync_base`, dentro de la
+operación, para comparar contra Supabase. Si la fila remota cambió, se detiene
+esa operación como `conflict`; no sobrescribe el dato remoto. Las ediciones
+antiguas que no tengan versión original ni confirmación previa también
+requieren revisión. Reiniciar la API con `AA_DB_PASSWORD` cargada antes de
+generar nuevos cambios para que incluya esa versión original.
+
+### Activación pendiente: credenciales privadas en la terminal
+
+1. En Supabase de **pruebas**, abrir **Connect → Session pooler**, puerto 5432.
+   Obtener el host y descargar el certificado CA desde **Database → Settings →
+   SSL Configuration** ([configuración de la base de pruebas](https://supabase.com/dashboard/project/wuenfwsjifwuupfjgubm/database/settings)).
+   No compartir contraseñas ni URI en el chat.
+2. Desde PowerShell, conectarse como administrador para configurar solamente
+   la cuenta de transporte. Reemplazar la ruta del certificado y escribir el
+   host indicado por Supabase:
+
+   ```powershell
+   $aaPoolHost = Read-Host 'Host del Session pooler de PRUEBAS'
+   $env:PGSSLMODE = 'verify-full'
+   $env:PGSSLROOTCERT = Read-Host 'Ruta completa del certificado CA descargado'
+   & 'C:\Program Files\PostgreSQL\18\bin\psql.exe' -X -h $aaPoolHost -p 5432 -U postgres.wuenfwsjifwuupfjgubm -d postgres -W
+   ```
+
+   PostgreSQL solicita la contraseña administrativa en la terminal. Dentro de
+   `psql`, definir una contraseña distinta para la cuenta de transporte:
+
+   ```text
+   \password aa_sync_worker
+   ALTER ROLE aa_sync_worker LOGIN;
+   \q
+   ```
+
+3. En una terminal separada de la API, ubicada en `Accion_Animal_Offline`,
+   cargar las credenciales de la cuenta local y de transporte. La URI debe
+   usar usuario `aa_sync_worker.wuenfwsjifwuupfjgubm`, el mismo host del pooler,
+   puerto 5432 y base `postgres`, **sin parámetros adicionales**. Si la
+   contraseña incluye caracteres reservados, codificarlos para una URI.
+
+   ```powershell
+   $env:AA_DB_PASSWORD = [System.Net.NetworkCredential]::new('', (Read-Host 'Contraseña de aa_local_app' -AsSecureString)).Password
+   $env:AA_SYNC_DB_URL = [System.Net.NetworkCredential]::new('', (Read-Host 'URI Session pooler de aa_sync_worker de PRUEBAS' -AsSecureString)).Password
+   $env:AA_SYNC_CA_FILE = Read-Host 'Ruta completa del certificado CA descargado'
+   node --env-file-if-exists=.env.local --env-file-if-exists=.env.server scripts/sync-test-data.mjs --check
+   ```
+
+   `--check` verifica conexiones, cuenta remota y confirmaciones; muestra
+   solamente recuentos y **no envía cambios**. No guardar estas credenciales en
+   archivos del repositorio. Si termina correctamente, avisar para revisar la
+   cola existente antes de iniciar el primer envío.
+
+4. Tras revisar el resultado y la cola, el envío se ejecuta con `--once`; el
+   proceso continuo usa `--watch`. No iniciar todavía el proceso continuo
+   antes de comprobar el primer lote:
+
+   ```powershell
+   node --env-file-if-exists=.env.local --env-file-if-exists=.env.server scripts/sync-test-data.mjs --once
+   node --env-file-if-exists=.env.local --env-file-if-exists=.env.server scripts/sync-test-data.mjs --watch
+   ```
+
+### Verificación realizada y trabajo pendiente
+
+Pasaron 41 comprobaciones de código y la compilación. La comprobación SQL
+`supabase/tests/database/offline_sync_receipts.test.sql` se ejecutó en Supabase
+de pruebas: verificó permisos, unicidad de confirmaciones, RLS, auditoría y
+alta/edición/eliminación de una mascota ficticia; terminó en `ROLLBACK`.
+No se ha enviado la cola local: falta habilitar la cuenta y verificar su conexión.
+
+La recepción de cambios clínicos y perfiles desde Supabase, la resolución
+asistida de conflictos y el arranque del sincronizador con Windows siguen
+pendientes. Este paso no completa la sincronización bidireccional. El paso 3
+de instalación definitiva también conserva sus pendientes de HTTPS y respaldos.
 
 ## Ensayo de importación desde Supabase de pruebas
 
@@ -164,8 +336,8 @@ esta PC. No pegar contraseñas ni URI en el chat o en archivos del repositorio.
 Introducir ambas sin mostrarlas:
 
 ```powershell
-$env:AA_TEST_DB_URL = Read-Host 'URI PostgreSQL de Supabase de pruebas' -MaskInput
-$env:AA_DB_PASSWORD = Read-Host 'Contraseña de aa_local_app' -MaskInput
+$env:AA_TEST_DB_URL = [System.Net.NetworkCredential]::new('', (Read-Host 'URI PostgreSQL de Supabase de pruebas' -AsSecureString)).Password
+$env:AA_DB_PASSWORD = [System.Net.NetworkCredential]::new('', (Read-Host 'Contraseña de aa_local_app' -AsSecureString)).Password
 node scripts/import-test-data.mjs --check
 ```
 
@@ -174,3 +346,301 @@ ejecutar `node scripts/import-test-data.mjs --apply` para conservar la copia
 local de pruebas. El destino `accion_animal_dev` puede tener perfiles creados
 por el inicio de sesión, siempre que también existan en el origen de pruebas.
 El script falla antes de importar si ya hay datos clínicos locales.
+
+### 4.6 Recepción de perfiles
+
+La migración remota offline_profiles_inbound está aplicada en PRUEBAS.
+El trabajador solo lee perfiles; no lee contraseñas de Supabase Auth.
+Detén --watch con Ctrl+C en su terminal y conserva las variables cargadas.
+Ejecuta:
+
+    node --env-file-if-exists=.env.local --env-file-if-exists=.env.server scripts/sync-test-data.mjs --profiles
+
+Se actualizan nombres, roles y actividad de forma atómica. Los perfiles ausentes
+se desactivan sin borrar sus referencias clínicas. Se eliminan credenciales
+locales de perfiles inactivos, pero no se renueva su plazo de siete días.
+Después puedes volver a iniciar --watch.
+Los modos --once y --watch reciben perfiles antes de enviar cambios clínicos. Con --watch se revisan cada 30 segundos mientras el trabajador esté abierto. La recepción de ediciones de mascotas existentes se describe en 4.9. Límite de perfiles: 1000 perfiles; superar ese límite cancela
+la recepción sin cambiar el acceso local.
+### 4.7 Comparación de mascotas (solo lectura)
+
+Detén --watch con Ctrl+C, conservando las variables de la misma terminal.
+Ejecuta sync-test-data.mjs --pets-check con los mismos --env-file-if-exists.
+El resultado contiene recuentos, UUID, nombres de campos diferentes y local_pending;
+no imprime datos clínicos ni modifica registros. Requiere un perfil clínico activo
+tanto local como remoto. Una mascota solo local no prueba que fue eliminada
+en Supabase: puede ser una creación pendiente. La recepción clínica aún no aplica
+cambios. Límite explícito: 10000 mascotas por base.
+### 4.8 Recepción manual de una mascota existente
+
+Aplicar db/local/migrations/004_pet_inbound.sql a accion_animal_dev con el
+administrador PostgreSQL LOCAL (postgres), no con la contraseña de Supabase
+ni la de aa_local_app. La cuenta del sincronizador sigue siendo aa_local_app.
+La prueba db/local/tests/pet_inbound.test.sql termina en ROLLBACK.
+
+Con --watch detenido y las variables conservadas, ejecutar el sincronizador
+con --pet-receive UUID. Este paso actualiza solo una mascota existente;
+rechaza operaciones locales sin confirmar y ausencias remotas. No importa
+mascotas nuevas, no elimina mascotas ni recibe expedientes o archivos.
+La base remota queda guardada para verificar la siguiente escritura local,
+y su versión compite con los recibos posteriores. La recepción incrementa
+row_version para rechazar formularios locales abiertos antes del cambio.
+
+### 4.9 Recepción automática de ediciones de mascotas
+
+Plan de esta etapa:
+1. Recibir ediciones de mascotas que ya existen en la PC mediante lotes pequeños.
+2. Verificar un cambio de nombre hecho en Supabase y la protección de una edición
+   simultánea local pendiente.
+3. Después de esas verificaciones, ampliar a altas, eliminaciones y expedientes.
+
+Implementado el punto 1: --watch usa la misma conexión y cuenta de sincronización.
+Cada ciclo recibe perfiles, envía pendientes y revisa hasta 50 mascotas locales
+por UUID. Consulta esas UUID en Supabase usando su índice primario; no descarga
+toda la tabla ni agrega solicitudes al navegador. --once revisa un solo lote.
+La pausa entre ciclos es de 30 segundos más el tiempo de las consultas.
+Con más de 50 mascotas se requieren varias vueltas para revisar todas; el
+cursor vive en memoria y reiniciar vuelve al primer lote.
+
+Se actualizan solo filas con cambios de contenido, ignorando diferencias de
+marcas de auditoría. No se incrementa row_version en mascotas sin cambios.
+Las pendientes, bloqueadas y en conflicto se protegen; se comprueba la cola
+otra vez con el bloqueo de la fila antes de escribir. Una ausencia en Supabase
+no elimina la copia local. Este paso no importa nuevas mascotas ni expedientes.
+No necesita otra migración; requiere la 004 ya aplicada.
+
+Prueba siguiente: iniciar --watch, cambiar solamente name de una mascota
+ficticia existente en Supabase y esperar el mensaje:
+Recepción de mascotas de PRUEBAS: { checked: 2, received: 1, protected: 0 }
+Recargar la aplicación local para ver el nombre recibido.
+Detener --watch antes de usar comandos manuales del sincronizador.
+
+Verificación de código: 43 pruebas de sincronización, API y escrituras pasan.
+La prueba manual automática y la simultánea siguen pendientes hasta observar
+sus resultados; no declarar terminada la recepción clínica completa.
+
+### 4.10 Resolución revisada conservando una edición local
+
+La prueba automática recibió el nombre remoto y protegió después una mascota
+con una edición simultánea: received 0, protected 1. El diagnóstico confirmó
+un conflicto y mantuvo ambas versiones disponibles para comparación.
+
+Con --watch detenido, usar --resolve-local UUID-de-la-operación.
+El comando muestra las diferencias y pide escribir APLICAR para conservar
+la edición local. Admite UPDATE con o sin base original; exige que la
+dependencia anterior esté confirmada y el autor conserve permisos remotos.
+La misma transacción bloquea la fila, compara el hash de la versión revisada,
+escribe y guarda el recibo. Si la fila cambió tras revisar, cancela sin escribir.
+No aplicar esta opción a altas o eliminaciones. La resolución remota o mezcla
+de campos sigue pendiente. El usuario eligió el nombre local para esta prueba;
+falta observar la confirmación del comando y comprobar la cola sin conflictos.
+
+Verificación: las 15 pruebas del sincronizador pasan, incluyendo resolución
+con base previa y rechazo de cambios posteriores a la revisión.
+### 4.11 Recepción automática de mascotas nuevas
+
+Los modos --watch y --once descubren también hasta 50 UUID de mascotas en
+Supabase por ciclo, usando el índice primario y un cursor en memoria. Solo se
+descargan los datos completos de las que faltan localmente. Se conservan UUID,
+campos, auditoría original y referencia remota. No se añade una operación de
+salida por importar. Las versiones continúan después del máximo historial
+local o de recibos remotos para no reutilizar versiones de un UUID anterior.
+
+Antes de insertar se consulta la cola incluso si la mascota ya no existe en
+la tabla local: una eliminación pendiente, bloqueada o en conflicto protege
+ese UUID. Las restricciones y claves foráneas siguen vigentes. Si otra
+transacción creó la misma UUID, ON CONFLICT DO NOTHING evita sobrescribirla.
+No se reciben todavía sus expedientes, vacunas, notas, pesos ni archivos.
+No se eliminan mascotas por ausencia remota. Requiere la migración 004 y la
+recepción de perfiles ya existentes; no requiere una migración adicional.
+
+Prueba siguiente, pendiente: reiniciar --watch y crear una mascota ficticia
+en Supabase; comprobar Mascotas nuevas de PRUEBAS con received 1 y su aparición
+tras recargar la aplicación. Después verificar su edición local y confirmación.
+
+Verificación de código: 45 pruebas de sincronización, API y escrituras pasan.
+La resolución de la prueba simultánea anterior terminó correctamente y el
+diagnóstico del usuario mostró 42 confirmadas, sin conflictos pendientes.
+
+### 4.12 Recepción de expedientes clínicos
+
+Confirmado por el usuario: una mascota nueva de Supabase llegó a la PC y su
+edición local produjo confirmed: 1. Implementada ahora la recepción de altas y
+ediciones de clinical_records con lotes de 50 UUID por ciclo de --once/--watch.
+Reutiliza la recepción de mascotas, conserva referencia remota y continúa las
+versiones después del historial previo. No crea operaciones de salida al importar.
+Protege pendientes, bloqueadas y conflictos, incluidas eliminaciones locales.
+Comprueba la cola bajo bloqueo de fila; exige la mascota local y aplaza el
+expediente si falta o tiene una eliminación pendiente. No modifica filas iguales.
+Las ausencias remotas no eliminan la copia local. Mantiene RLS remoto.
+
+Con --watch detenido, aplicar una sola vez usando el administrador PostgreSQL
+LOCAL (postgres) y su contraseña local:
+
+```powershell
+& 'C:\Program Files\PostgreSQL\18\bin\psql.exe' -X -h 127.0.0.1 -p 5432 -U postgres -d accion_animal_dev -W -v ON_ERROR_STOP=1 -f 'db/local/migrations/005_clinical_records_inbound.sql'
+& 'C:\Program Files\PostgreSQL\18\bin\psql.exe' -X -h 127.0.0.1 -p 5432 -U postgres -d accion_animal_dev -W -v ON_ERROR_STOP=1 -f 'db/local/tests/clinical_records_inbound.test.sql'
+```
+
+La prueba SQL crea una consulta ficticia para una mascota existente y termina
+en ROLLBACK. Tras COMMIT de la migración y ROLLBACK de la prueba, ejecutar en
+la terminal que conserva AA_DB_PASSWORD, AA_SYNC_DB_URL y AA_SYNC_CA_FILE:
+
+```powershell
+node --env-file-if-exists=.env.local --env-file-if-exists=.env.server scripts/sync-test-data.mjs --once
+```
+
+Este comando también envía pendientes. Revisar Expedientes clínicos de PRUEBAS
+con checked, received y protected. Para verificar: crear o editar una consulta
+ficticia en Supabase para una mascota ya local, comprobar su recepción, editarla
+localmente y comprobar confirmed: 1. Verificar también una edición simultánea:
+el conflicto debe proteger la versión local. Reiniciar --watch solo después de
+estas comprobaciones. Cada ciclo revisa 50 expedientes; los cursores viven en
+memoria y una vuelta completa requiere ceil(N/50) ciclos.
+
+Estado: 47 pruebas de código y build pasan. Migración 005, prueba SQL y ensayo
+conectado pendientes; no afirmar recepción real verificada todavía. Vacunas,
+medicamentos, alergias, notas, pesos, metadatos de archivos y eliminaciones
+remotas siguen pendientes. Tampoco está terminado el arranque automático,
+HTTPS ni respaldos de la PC definitiva.
+
+### Contraseñas: nombres recomendados en el gestor
+
+| Nombre clave | Cuenta y uso |
+| --- | --- |
+| AA / PC / PostgreSQL administrador | postgres LOCAL: migraciones y administración de accion_animal_dev. |
+| AA / PC / PostgreSQL aplicación | aa_local_app LOCAL: AA_DB_PASSWORD para API y sincronizador. |
+| AA / Supabase PRUEBAS / PostgreSQL administrador | postgres remoto: administración del proyecto de pruebas; distinta de postgres local. |
+| AA / Supabase PRUEBAS / Sincronizador | aa_sync_worker remoto: transporte; su contraseña forma parte de AA_SYNC_DB_URL. |
+| AA / Aplicación / usuario / correo | Contraseña de ingreso del usuario en Supabase Auth; distinta de todas las contraseñas PostgreSQL. |
+
+AA_SYNC_CA_FILE es una ruta de certificado, no una contraseña. AA_SYNC_DB_URL
+es una URI que contiene un secreto: guardar como campo privado del registro del
+sincronizador. Separar los registros de PRUEBAS y PRODUCCIÓN cuando se configure
+la PC definitiva; no reutilizar contraseñas ni guardarlas en Git. Supabase Auth
+no entrega contraseñas a PostgreSQL local; el acceso offline conserva un
+verificador temporal del ingreso ya validado, no una contraseña administrativa.
+
+### 4.13 Recepción de recursos clínicos relacionados
+
+Verificado por el usuario el paso 4.12: edición remota recibida, edición local
+posterior confirmed: 1, edición simultánea conflict: 1 / protected: 1, resolución
+revisada conservando el local confirmed: true y ciclo siguiente sin conflictos.
+La preferencia para resolver conflictos es conservar el local, con revisión
+explícita antes de sobrescribir la versión de Supabase.
+
+Implementada recepción de altas y ediciones de vaccinations, medications,
+allergies, pet_notes, weight_records y clinical_files. Reutiliza el receptor
+existente y su referencia remota. Cada tabla recorre hasta 50 UUID por ciclo;
+los cursores son independientes y viven en memoria. Primero se reciben mascotas,
+luego expedientes y luego recursos. Una mascota o consulta aún no recibida
+aplaza su recurso para la siguiente vuelta. Los medicamentos vinculados deben
+corresponder a la mascota de la consulta. La lectura remota conserva RLS y
+verifica el perfil clínico activo. No hay nuevos permisos remotos.
+
+Se protege cualquier operación sin confirmar del mismo recurso, incluidas
+eliminaciones locales aunque la fila ya no exista. También se protegen padres
+con eliminación pendiente. Se comprueba bajo bloqueo antes de escribir; las
+restricciones y claves foráneas permanecen vigentes. Una recepción no añade
+operaciones a la cola. La edición/eliminación posterior usa la nueva referencia
+remota aunque existan recibos anteriores. Las filas iguales no cambian versión.
+
+clinical_files recibe solo metadatos y valida la ruta uploaded/, nombre, tipo,
+tamaño y checksum con el validador existente. No descarga, crea ni elimina
+archivos físicos ni confirma que existan en disco. Una referencia recibida puede
+aparecer en la ficha y devolver archivo no encontrado si falta en esta PC.
+Las ausencias remotas no eliminan copias locales.
+
+Detener --watch con Ctrl+C antes de aplicar, conservar variables en su terminal.
+Aplicar UNA VEZ con postgres LOCAL y su contraseña administrativa local:
+
+```powershell
+& 'C:\Program Files\PostgreSQL\18\bin\psql.exe' -X -h 127.0.0.1 -p 5432 -U postgres -d accion_animal_dev -W -v ON_ERROR_STOP=1 -f 'db/local/migrations/006_clinical_resources_inbound.sql'
+```
+
+Después de COMMIT, ejecutar la comprobación SQL:
+
+```powershell
+& 'C:\Program Files\PostgreSQL\18\bin\psql.exe' -X -h 127.0.0.1 -p 5432 -U postgres -d accion_animal_dev -W -v ON_ERROR_STOP=1 -f 'db/local/tests/clinical_resources_inbound.test.sql'
+```
+
+Crea datos ficticios de las seis tablas y termina en ROLLBACK sin conservarlos.
+En la terminal que conserva las credenciales, ejecutar después --once. El
+sincronizador comprueba columnas de recepción en todas las tablas ANTES de
+enviar pendientes; sin 006 cancela y no ejecuta el ciclo.
+
+```powershell
+node --env-file-if-exists=.env.local --env-file-if-exists=.env.server scripts/sync-test-data.mjs --once
+```
+
+Prueba conectada siguiente: modificar una nota ficticia remota; observar
+Recursos clínicos de PRUEBAS (pet_notes) con received: 1 y verla en la PC.
+Editar después esa nota localmente y comprobar confirmed: 1. Con --watch
+detenido, editar la misma nota en ambos lados: esperar conflict: 1 y protected: 1,
+conservar ambas versiones y resolver con --resolve-local tras revisar.
+Repetir recepción con una vacuna y un peso; confirmar también medicamentos,
+alergias y metadatos de adjuntos. No declarar verificados los casos sin observarlos.
+
+Estado: 49 pruebas de sincronizador/API/escrituras pasan. Migración 006, prueba
+SQL y recepción conectada de estas seis tablas pendientes. Eliminaciones remotas,
+arranque automático, HTTPS y respaldos de la PC definitiva siguen pendientes.
+
+### 4.14 Eliminaciones remotas de recursos clínicos
+
+`--once` y `--watch` revisan también las filas locales de vaccinations,
+medications, allergies, pet_notes, weight_records, clinical_files y, al final,
+clinical_records y pets. Una fila
+ausente en Supabase se quita localmente solo si su versión actual proviene de
+una recepción remota o de una operación local confirmada y no hay operaciones
+sin confirmar. La ausencia se vuelve a verificar con la fila local bloqueada.
+No se elimina ningún archivo físico. Un expediente se conserva mientras tenga
+adjuntos o medicamentos vinculados en la PC. Una mascota se conserva mientras
+tenga cualquier expediente, vacuna, medicamento, alergia, nota o peso local.
+Las recepciones anteriores pueden quitar esos vínculos y una vuelta posterior
+eliminar al padre. Una operación pendiente o versión local no verificada lo
+protege aunque la fila ya no exista en Supabase.
+
+No requiere migración ni cambios en las tablas. Para comprobarlo con datos
+ficticios visibles en la interfaz: detener `--watch`, borrar en Supabase de
+PRUEBAS una nota (`pet_notes`) y una vacuna (`vaccinations`) ya sincronizadas,
+ejecutar `--once` en la terminal con las tres variables cargadas y revisar
+`Eliminaciones clínicas de PRUEBAS` con `deleted: 1` para cada tabla. Recargar
+la ficha local. Si no hay notas ficticias, omitir esa prueba. Probar después
+un expediente ficticio sin adjuntos ni medicamentos vinculados: la línea de
+`clinical_records` debe mostrar `deleted: 1` y la consulta desaparecer tras
+recargar la ficha. No probar campos que la interfaz local no permite editar.
+El usuario verificó `deleted: 4` en clinical_files y `deleted: 1` en
+clinical_records, después de eliminar un expediente remoto ficticio. La
+recepción de mascotas eliminadas sigue pendiente de verificación conectada:
+eliminar en Supabase de PRUEBAS una mascota ficticia, ejecutar `--once` con
+`--watch` detenido y comprobar `Eliminaciones de mascotas de PRUEBAS` con
+`deleted: 1`. Si tenía recursos clínicos, sus líneas deben mostrar las bajas
+primero; los archivos físicos permanecen en la PC. Recargar la lista local.
+
+El usuario verificó después `deleted: 1` para mascotas, sin conflictos ni
+pendientes. La prueba usó exclusivamente datos ficticios de PRUEBAS.
+
+### 4.15 Respaldo local inicial
+
+`scripts/backup-local.ps1` crea una copia completa de `accion_animal_dev` con
+`pg_dump` y de la carpeta configurada como `AA_STORAGE_ROOT`. La base incluye
+las operaciones pendientes de sincronización. No copia contraseñas, certificados
+ni archivos `.env`; conserva esos secretos por separado en el gestor de
+contraseñas. Exige un destino ya existente, fuera de `uploaded`, por ejemplo un
+USB cifrado. Pide la contraseña de **postgres LOCAL**, distinta de la de
+`aa_local_app` y de las cuentas de Supabase.
+
+En la PC definitiva, ajustar las rutas reales y ejecutar desde la carpeta del
+proyecto:
+
+```powershell
+& .\scripts\backup-local.ps1 -Destination 'F:\RespaldosAA' -StorageRoot 'E:\AccionAnimal\uploaded' -PgBin 'C:\Program Files\PostgreSQL\18\bin'
+```
+
+El comando crea una carpeta con fecha, verifica que `pg_restore` lea el dump,
+compara la copia de archivos con `robocopy /L` y solo entonces escribe
+`COMPLETO.txt`. Si falla, la carpeta puede estar incompleta: no usarla como
+respaldo verificado. La comprobación definitiva es restaurar periódicamente una
+copia en una base y carpeta de ensayo separadas. Aún no se ha ejecutado en la
+PC definitiva ni se ha programado una tarea diaria; primero falta verificar una
+ejecución real y la restauración de prueba.

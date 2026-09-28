@@ -26,7 +26,7 @@ if (sourceAddress.hostname === `db.${testProject}.supabase.co`) {
 
 const source = new Client({ connectionString: sourceUrl })
 const target = new Client({
-  host: '127.0.0.1', port: Number(process.env.AA_DB_PORT || 5432),
+  host: '127.0.0.1', ssl: false, port: Number(process.env.AA_DB_PORT || 5432),
   database: 'accion_animal_dev', user: 'aa_local_app', password: process.env.AA_DB_PASSWORD,
 })
 

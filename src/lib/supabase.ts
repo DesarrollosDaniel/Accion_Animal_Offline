@@ -9,8 +9,10 @@ if (!supabaseUrl || !supabasePublishableKey) {
 
 export const supabase = createClient(supabaseUrl, supabasePublishableKey, {
   auth: {
-    persistSession: true,
-    autoRefreshToken: true,
-    detectSessionInUrl: true,
+    // La sesión clínica vive en el servidor local. Supabase solo se usa
+    // durante el acceso con internet y la administración de cuentas.
+    persistSession: false,
+    autoRefreshToken: false,
+    detectSessionInUrl: false,
   },
 })

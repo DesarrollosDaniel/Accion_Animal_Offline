@@ -12,18 +12,6 @@ export function localFileUrl(value: string | null) {
   return `/uploaded/${parts.map(encodeURIComponent).join('/')}`
 }
 
-export async function establishLocalSession(accessToken: string) {
-  const response = await fetch('/api/local-session', {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { Authorization: `Bearer ${accessToken}` },
-  })
-  const body = await response.json().catch(() => ({})) as { error?: string; ok?: boolean }
-  if (!response.ok || body.ok !== true) {
-    throw new Error(body.error || 'No fue posible conectar con el almacenamiento local.')
-  }
-}
-
 export async function clearLocalSession() {
   await fetch('/api/local-session', { method: 'DELETE', credentials: 'same-origin' }).catch(() => {})
 }

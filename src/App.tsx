@@ -1,5 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
-import type { Session } from '@supabase/supabase-js'
+import { FormEvent, lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import {
   ArrowLeft,
   CalendarDays,
@@ -21,12 +20,15 @@ import {
   X,
 } from 'lucide-react'
 import { supabase } from './lib/supabase'
-import { clearLocalSession, establishLocalSession, localFileUrl } from './lib/localFiles'
+import { clearLocalSession, localFileUrl } from './lib/localFiles'
+import { currentLocalUser, localLogin, type LocalUser } from './lib/localAuth'
 import { vaccineOptions } from './lib/vaccines'
-import { PetDetails, type DetailedPet } from './components/PetDetails'
+import type { DetailedPet } from './components/PetDetails'
+import { localData } from './lib/localApi'
+const PetDetails = lazy(() => import('./components/PetDetails').then((module) => ({ default: module.PetDetails })))
 
 type Role = 'owner' | 'veterinarian' | 'reception'
-type View = 'dashboard' | 'pets' | 'inactive-pets' | 'local-preview' | 'users'
+type View = 'dashboard' | 'pets' | 'inactive-pets' | 'users'
 
 interface Profile {
   id: string
@@ -39,7 +41,15 @@ interface Profile {
 type Pet = DetailedPet
 type LocalPet = Pet & { row_version: string }
 
-const petFields = 'id, legacy_id, name, birth_date, color_markings, species, breed, usual_food, sex, is_sterilized, sterilization_date, status, photo_path, guardian_name, guardian_phone, guardian_address, guardian_street, guardian_number, referral_source, created_at'
+async function localPets(): Promise<LocalPet[]> {
+  const pets: LocalPet[] = []
+  for (let offset = 0; offset <= 10000; offset += 200) {
+    const page = await localData<LocalPet[]>(`pets?status=all&limit=200&offset=${offset}`)
+    pets.push(...page)
+    if (page.length < 200) return pets
+  }
+  throw new Error('La lista local supera el límite de 10 000 mascotas. Usa la búsqueda.')
+}
 
 const roleLabels: Record<Role, string> = {
   owner: 'Dueño',
@@ -51,7 +61,6 @@ const navItems: Array<{ id: View; label: string; icon: typeof LayoutDashboard; o
   { id: 'dashboard', label: 'Resumen', icon: LayoutDashboard },
   { id: 'pets', label: 'Mascotas', icon: PawPrint },
   { id: 'inactive-pets', label: 'Mascotas inactivas', icon: PawPrint },
-  { id: 'local-preview', label: 'Datos locales (prueba)', icon: PawPrint },
   { id: 'users', label: 'Usuarios', icon: ShieldCheck, ownerOnly: true },
 ]
 
@@ -79,7 +88,7 @@ function initials(name: string) {
     .join('')
 }
 
-function Login() {
+function Login({ onLogin }: { onLogin: (user: LocalUser) => void }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
@@ -90,9 +99,14 @@ function Login() {
     event.preventDefault()
     setLoading(true)
     setError('')
-    const { error: authError } = await supabase.auth.signInWithPassword({ email, password })
-    if (authError) setError('No fue posible iniciar sesión. Revisa tu correo y contraseña.')
-    setLoading(false)
+    try {
+      onLogin(await localLogin(email, password))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No fue posible iniciar sesión.')
+    } finally {
+      setPassword('')
+      setLoading(false)
+    }
   }
 
   return (
@@ -150,7 +164,7 @@ function Login() {
             {loading ? 'Ingresando…' : 'Ingresar'}
             {!loading && <ChevronRight size={18} />}
           </button>
-          <p className="login-help">¿Problemas para acceder? Contacta al usuario dueño.</p>
+          <p className="login-help">El primer acceso requiere internet. Después podrás ingresar sin conexión durante siete días.</p>
         </form>
       </section>
     </main>
@@ -223,7 +237,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   )
 }
 
-function PetForm({ onClose, onSaved, local = false }: { onClose: () => void; onSaved: (petId: string) => Promise<void>; local?: boolean }) {
+function PetForm({ onClose, onSaved }: { onClose: () => void; onSaved: (petId: string) => Promise<void> }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [species, setSpecies] = useState<keyof typeof vaccineOptions | ''>('')
@@ -286,47 +300,19 @@ function PetForm({ onClose, onSaved, local = false }: { onClose: () => void; onS
       setSaving(false)
       return
     }
-    if (local) {
-      try {
-        const response = await fetch('/api/local/pets', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pet: payload, vaccinations: selectedVaccinations.map((entry) => ({ ...entry, administered_on: entry.administered_on || todayDateValue() })), note: observation || null }),
-        })
-        const body = await response.json()
-        if (!response.ok) throw new Error(body.error || 'No fue posible guardar la mascota local.')
-        await onSaved(body.data.id)
-        onClose()
-      } catch (cause) {
-        setError(cause instanceof Error ? cause.message : 'No fue posible guardar la mascota local.')
-      } finally {
-        setSaving(false)
-      }
-      return
-    }
-    const { data: insertedPet, error: insertError } = await supabase.from('pets').insert(payload).select('id').single()
-    if (insertError || !insertedPet) {
-      setError(insertError?.message || 'No fue posible guardar la mascota.')
+    try {
+      const insertedPet = await localData<LocalPet>('pets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pet: payload, vaccinations: selectedVaccinations.map((entry) => ({ ...entry, administered_on: entry.administered_on || todayDateValue() })), note: observation || null }),
+      })
+      await onSaved(insertedPet.id)
+      onClose()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No fue posible guardar la mascota local.')
+    } finally {
       setSaving(false)
-      return
     }
-    let relatedError: { message: string } | null = null
-    if (selectedVaccinations.length) {
-      const result = await supabase.from('vaccinations').insert(selectedVaccinations.map((entry) => ({ pet_id: insertedPet.id, vaccine_name: entry.vaccine_name, administered_on: entry.administered_on || todayDateValue() })))
-      relatedError = result.error
-    }
-    if (!relatedError && observation) {
-      const result = await supabase.from('pet_notes').insert({ pet_id: insertedPet.id, body: observation })
-      relatedError = result.error
-    }
-    if (relatedError) {
-      const { error: cleanupError } = await supabase.from('pets').delete().eq('id', insertedPet.id)
-      setError(cleanupError ? `${relatedError.message} La mascota quedó creada de forma incompleta; elimínala antes de intentar nuevamente.` : relatedError.message)
-      setSaving(false)
-      return
-    }
-    await onSaved(insertedPet.id)
-    onClose()
   }
 
   return (
@@ -490,132 +476,13 @@ function DeleteUserForm({ user, onClose, onDeleted }: { user: Profile; onClose: 
   )
 }
 
-function LocalPreview({ role }: { role: Role }) {
-  const [pets, setPets] = useState<LocalPet[]>([])
-  const [petsRevision, setPetsRevision] = useState(0)
-  const [creatingPet, setCreatingPet] = useState(false)
-  const [selected, setSelected] = useState<LocalPet | null>(null)
-  const [records, setRecords] = useState<Array<{ id: string; occurred_at: string; provisional_diagnosis: string | null; treatment: string | null }>>([])
-  const [error, setError] = useState('')
-  const [listError, setListError] = useState('')
-  const [loading, setLoading] = useState(true)
-  const [loadingRecords, setLoadingRecords] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [savingPet, setSavingPet] = useState(false)
-  const [recordsRevision, setRecordsRevision] = useState(0)
-  const [saved, setSaved] = useState('')
-
-  useEffect(() => {
-    const controller = new AbortController()
-    setListError('')
-    void fetch('/api/local/pets?status=all&limit=200', { signal: controller.signal })
-      .then(async (response) => {
-        const body = await response.json()
-        if (!response.ok) throw new Error(body.error || 'No fue posible consultar PostgreSQL local.')
-        setPets(body.data as LocalPet[])
-      })
-      .catch((cause) => { if (!controller.signal.aborted) setListError(cause instanceof Error ? cause.message : 'Error de consulta local.') })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
-    return () => controller.abort()
-  }, [petsRevision])
-
-  useEffect(() => {
-    if (!selected) return
-    const controller = new AbortController()
-    setRecords([])
-    setLoadingRecords(true)
-    void fetch(`/api/local/pets/${selected.id}/clinical-records?limit=200`, { signal: controller.signal })
-      .then(async (response) => {
-        const body = await response.json()
-        if (!response.ok) throw new Error(body.error || 'No fue posible consultar los expedientes locales.')
-        setRecords(body.data)
-      })
-      .catch((cause) => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Error de consulta local.') })
-      .finally(() => { if (!controller.signal.aborted) setLoadingRecords(false) })
-    return () => controller.abort()
-  }, [selected, recordsRevision])
-
-  async function saveRecord(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (!selected) return
-    const form = event.currentTarget
-    const data = new FormData(form)
-    setSaving(true)
-    setError('')
-    setSaved('')
-    try {
-      const response = await fetch(`/api/local/pets/${selected.id}/clinical-records`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ record: {
-          occurred_at: new Date().toISOString(),
-          provisional_diagnosis: String(data.get('diagnosis') || '').trim(),
-          treatment: String(data.get('treatment') || '').trim() || null,
-        } }),
-      })
-      const body = await response.json()
-      if (!response.ok) throw new Error(body.error || 'No fue posible guardar el expediente local.')
-      form.reset()
-      setSaved('Expediente guardado en PostgreSQL local.')
-      setRecordsRevision((current) => current + 1)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'No fue posible guardar el expediente local.')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  async function savePet(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (!selected) return
-    const data = new FormData(event.currentTarget)
-    setSavingPet(true)
-    setError('')
-    setSaved('')
-    try {
-      const response = await fetch(`/api/local/pets/${selected.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          expected_version: selected.row_version,
-          changes: {
-            name: String(data.get('name') || '').trim(),
-            guardian_name: String(data.get('guardian_name') || '').trim(),
-            status: String(data.get('status') || 'active'),
-          },
-        }),
-      })
-      const body = await response.json()
-      if (!response.ok) throw new Error(body.error || 'No fue posible actualizar la mascota local.')
-      const updated = body.data as LocalPet
-      setSelected(updated)
-      setPets((current) => current.map((pet) => pet.id === updated.id ? updated : pet))
-      setSaved('Mascota actualizada en PostgreSQL local.')
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'No fue posible actualizar la mascota local.')
-    } finally {
-      setSavingPet(false)
-    }
-  }
-
-  return <section className="panel page-panel">
-    <div className="page-actions"><div><p className="eyebrow">PostgreSQL local</p><h2>Datos locales de prueba</h2><p className="muted">Consulta limitada a 200 mascotas. Los registros creados aquí quedan solo en PostgreSQL local de pruebas; la pantalla principal todavía usa Supabase.</p></div>{role !== 'reception' && !listError && <button className="button primary" onClick={() => setCreatingPet(true)}><Plus size={18} /> Nueva mascota local de prueba</button>}</div>
-    {listError && <p className="form-error" role="alert">{listError}</p>}
-    {error && <p className="form-error" role="alert">{error}</p>}
-    {saved && <p role="status">{saved}</p>}
-    {loading ? <p>Cargando datos locales…</p> : listError ? null : pets.length === 0 ? <p>No hay mascotas en PostgreSQL local.</p> : <div className="table-wrap responsive-table"><table><thead><tr><th>Mascota</th><th>Tutor</th><th>Especie</th><th>Estado</th><th>Acción</th></tr></thead><tbody>{pets.map((pet) => <tr key={pet.id}><td>{pet.name}</td><td>{pet.guardian_name}</td><td>{pet.species}</td><td>{pet.status}</td><td><button className="text-button" onClick={() => { setError(''); setSelected(pet) }}>Ver expedientes</button></td></tr>)}</tbody></table></div>}
-    {selected && <div><h3>{selected.name}</h3><p>Tutor: {selected.guardian_name} · Fecha de nacimiento: {selected.birth_date || '—'}</p>{role !== 'reception' && <form key={selected.id} className="form-grid" onSubmit={(event) => void savePet(event)}><label>Nombre<input name="name" defaultValue={selected.name} required maxLength={200} /></label><label>Tutor<input name="guardian_name" defaultValue={selected.guardian_name} required maxLength={200} /></label><label>Estado<select name="status" defaultValue={selected.status}><option value="active">Activo</option><option value="inactive">Inactivo</option><option value="deceased">Deceso</option></select></label><div className="form-actions span-2"><button className="button secondary" type="submit" disabled={savingPet}>{savingPet ? 'Guardando…' : 'Guardar cambios locales'}</button></div></form>}<h4>Expedientes locales</h4>{loadingRecords ? <p>Cargando expedientes…</p> : records.length ? records.map((record) => <p key={record.id}>{formatDate(record.occurred_at, true)} · {record.provisional_diagnosis || 'Sin diagnóstico'} · {record.treatment || 'Sin tratamiento'}</p>) : <p>Sin expedientes registrados.</p>}{role !== 'reception' && <form className="form-grid" onSubmit={(event) => void saveRecord(event)}><label>Diagnóstico de prueba<input name="diagnosis" required maxLength={10000} /></label><label>Tratamiento de prueba<input name="treatment" maxLength={20000} /></label><div className="form-actions span-2"><button className="button primary" type="submit" disabled={saving}>{saving ? 'Guardando…' : 'Guardar expediente local de prueba'}</button></div></form>}</div>}
-    {creatingPet && <Modal title="Registrar mascota local de prueba" onClose={() => setCreatingPet(false)}><PetForm local onClose={() => setCreatingPet(false)} onSaved={async () => { setSelected(null); setSaved('Mascota guardada en PostgreSQL local.'); setPetsRevision((current) => current + 1) }} /></Modal>}
-  </section>
-}
-
-function Workspace({ session, onSignOut }: { session: Session; onSignOut: () => Promise<void> }) {
+function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSignOut: () => Promise<void> }) {
   const workspaceStorageKey = `accion-animal:workspace:${session.user.id}`
   const restoredWorkspace = useMemo(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(workspaceStorageKey) || '{}') as { view?: unknown; search?: unknown; selectedPetId?: unknown; expandedPetId?: unknown }
       return {
-        view: saved.view === 'pets' || saved.view === 'inactive-pets' || saved.view === 'local-preview' || saved.view === 'users' ? saved.view : 'dashboard' as View,
+        view: saved.view === 'pets' || saved.view === 'inactive-pets' || saved.view === 'users' ? saved.view : 'dashboard' as View,
         search: typeof saved.search === 'string' ? saved.search : '',
         selectedPetId: typeof saved.selectedPetId === 'string' ? saved.selectedPetId : typeof saved.expandedPetId === 'string' ? saved.expandedPetId : null,
       }
@@ -625,9 +492,10 @@ function Workspace({ session, onSignOut }: { session: Session; onSignOut: () => 
   }, [workspaceStorageKey])
   const [profile, setProfile] = useState<Profile | null>(null)
   const [profiles, setProfiles] = useState<Profile[]>([])
-  const [pets, setPets] = useState<Pet[]>([])
+  const [usersError, setUsersError] = useState('')
+  const [pets, setPets] = useState<LocalPet[]>([])
   const [dashboardCounts, setDashboardCounts] = useState({ activePets: 0, clinicalRecords: 0, inactivePets: 0 })
-  const [searchResults, setSearchResults] = useState<Pet[] | null>(null)
+  const [searchResults, setSearchResults] = useState<LocalPet[] | null>(null)
   const [view, setView] = useState<View>(restoredWorkspace.view)
   const [search, setSearch] = useState(restoredWorkspace.search)
   const [loading, setLoading] = useState(true)
@@ -641,28 +509,47 @@ function Workspace({ session, onSignOut }: { session: Session; onSignOut: () => 
   const loadData = useCallback(async () => {
     setLoading(true)
     setError('')
-    const [profileResult, profilesResult, activePetListResult, inactivePetListResult, totalPetsResult, activePetsResult, clinicalRecordsResult] = await Promise.all([
-      supabase.from('profiles').select('id, display_name, role, is_active, created_at').eq('id', session.user.id).single(),
-      supabase.from('profiles').select('id, display_name, role, is_active, created_at').order('created_at', { ascending: true }),
-      supabase.from('pets').select(petFields).eq('status', 'active').order('created_at', { ascending: false }).limit(500),
-      supabase.from('pets').select(petFields).neq('status', 'active').order('created_at', { ascending: false }).limit(500),
-      supabase.from('pets').select('id', { count: 'exact', head: true }),
-      supabase.from('pets').select('id', { count: 'exact', head: true }).eq('status', 'active'),
-      supabase.from('clinical_records').select('id', { count: 'exact', head: true }),
-    ])
-
-    const firstError = profileResult.error || profilesResult.error || activePetListResult.error || inactivePetListResult.error || totalPetsResult.error || activePetsResult.error || clinicalRecordsResult.error
-    if (firstError) setError(firstError.message)
-    if (profileResult.data) setProfile(profileResult.data as Profile)
-    if (profilesResult.data) setProfiles(profilesResult.data as Profile[])
-    if (activePetListResult.data || inactivePetListResult.data) setPets([...(activePetListResult.data || []), ...(inactivePetListResult.data || [])] as Pet[])
-    const totalPets = totalPetsResult.count || 0
-    const activePets = activePetsResult.count || 0
-    setDashboardCounts({ activePets, clinicalRecords: clinicalRecordsResult.count || 0, inactivePets: totalPets - activePets })
+    try {
+      const [localProfile, petList, counts] = await Promise.all([
+        localData<Profile>('profile'),
+        localPets(),
+        localData<{ activePets: number; inactivePets: number; clinicalRecords: number }>('summary'),
+      ])
+      setProfile(localProfile)
+      setPets(petList)
+      setDashboardCounts(counts)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No fue posible cargar los datos locales.')
+    }
     setLoading(false)
   }, [session.user.id])
 
   useEffect(() => { void loadData() }, [loadData])
+
+  useEffect(() => {
+    if (view !== 'users' || profile?.role !== 'owner') return
+    setUsersError('')
+    if (!session.user.online) {
+      setProfiles([])
+      setUsersError('Para administrar usuarios, cierra sesión e ingresa con internet.')
+      return
+    }
+    let cancelled = false
+    void supabase.from('profiles').select('id, display_name, role, is_active, created_at')
+      .order('created_at', { ascending: true }).then(({ data, error: usersError }) => {
+        if (cancelled) return
+        if (usersError) {
+          setProfiles([])
+          setUsersError('La administración de usuarios requiere una sesión con internet.')
+        } else setProfiles(data as Profile[])
+      }, () => {
+        if (!cancelled) {
+          setProfiles([])
+          setUsersError('No fue posible cargar los usuarios. Revisa la conexión e inténtalo de nuevo.')
+        }
+      })
+    return () => { cancelled = true }
+  }, [view, profile?.role, loading, session.user.online])
 
   useEffect(() => {
     try {
@@ -677,30 +564,23 @@ function Workspace({ session, onSignOut }: { session: Session; onSignOut: () => 
   }, [profile, view])
 
   useEffect(() => {
-    const term = search.trim().replace(/[,%()]/g, ' ').trim()
+    const term = search.trim().slice(0, 100)
     if (!term) {
       setSearchResults(null)
       return
     }
-    let cancelled = false
+    const controller = new AbortController()
     const timer = window.setTimeout(async () => {
-      const pattern = `%${term}%`
-      const filters = ['name', 'species', 'breed', 'guardian_name', 'guardian_phone'].map((field) => `${field}.ilike.${pattern}`)
-      if (/^\d+$/.test(term)) filters.push(`legacy_id.eq.${term}`)
-      let query = supabase
-        .from('pets')
-        .select(petFields)
-        .or(filters.join(','))
-        .order('created_at', { ascending: false })
-        .limit(200)
-      query = view === 'inactive-pets' ? query.neq('status', 'active') : query.eq('status', 'active')
-      const { data, error: searchError } = await query
-      if (cancelled) return
-      if (searchError) setError(searchError.message)
-      setSearchResults((data || []) as Pet[])
+      try {
+        const statuses = view === 'inactive-pets' ? ['inactive', 'deceased'] : ['active']
+        const results = await Promise.all(statuses.map((status) => localData<LocalPet[]>(`pets?status=${status}&limit=200&search=${encodeURIComponent(term)}`, { signal: controller.signal })))
+        setSearchResults(results.flat().sort((a, b) => b.created_at.localeCompare(a.created_at)))
+      } catch (cause) {
+        if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'No fue posible buscar mascotas.')
+      }
     }, 250)
     return () => {
-      cancelled = true
+      controller.abort()
       window.clearTimeout(timer)
     }
   }, [search, view])
@@ -729,7 +609,7 @@ function Workspace({ session, onSignOut }: { session: Session; onSignOut: () => 
   if (loading && !profile) return <div className="app-loader"><span className="loader" /><p>Cargando espacio de trabajo…</p></div>
 
   if (!profile || !profile.is_active) {
-    return <div className="app-loader"><p className="form-error">Tu perfil no está disponible o se encuentra desactivado.</p><button className="button secondary" onClick={() => void onSignOut()}>Cerrar sesión</button></div>
+    return <div className="app-loader"><p className="form-error">{error || 'Tu perfil no está disponible o se encuentra desactivado.'}</p><button className="button primary" onClick={() => void loadData()}>Reintentar</button><button className="button secondary" onClick={() => void onSignOut()}>Cerrar sesión</button></div>
   }
 
   return (
@@ -772,7 +652,6 @@ function Workspace({ session, onSignOut }: { session: Session; onSignOut: () => 
           {error && <div className="alert error"><strong>No se pudo cargar toda la información.</strong><span>{error}</span></div>}
           {notice && <div className="alert success" role="status"><ShieldCheck size={18} /><span>{notice}</span></div>}
 
-          {view === 'local-preview' && <LocalPreview role={profile.role} />}
 
           {view === 'dashboard' && (
             <>
@@ -799,14 +678,14 @@ function Workspace({ session, onSignOut }: { session: Session; onSignOut: () => 
           {(view === 'pets' || view === 'inactive-pets') && (
             <section className="panel page-panel">
               <div className="page-actions"><div><p className="eyebrow">Expedientes</p><h2>{view === 'inactive-pets' ? 'Decesos' : 'Mascotas'}</h2><p className="muted">{view === 'inactive-pets' ? 'Mascotas enviadas a decesos. El estado se puede revertir.' : 'La búsqueda muestra únicamente mascotas activas.'}</p></div>{view === 'pets' && profile.role !== 'reception' && <button className="button primary" onClick={() => setModal('pet')}><Plus size={18} /> Nueva mascota</button>}</div>
-              <div className="search-box"><input value={search} onChange={(event) => { setSearch(event.target.value); setSelectedPetId(null) }} placeholder="Buscar por ID, mascota, especie, raza, tutor o teléfono" /><Search size={19} /></div>
+              <div className="search-box"><input value={search} maxLength={100} onChange={(event) => { setSearch(event.target.value); setSelectedPetId(null) }} placeholder="Buscar por ID, mascota, especie, raza, tutor o teléfono" /><Search size={19} /></div>
               {selectedPet ? (
                 <section className="pet-detail-section" aria-labelledby="selected-pet-title">
                   <header className="pet-detail-header">
                     <button className="button primary" onClick={() => setSelectedPetId(null)}><ArrowLeft size={18} /> Volver a resultados</button>
                     <div><p className="eyebrow">Detalle de mascota</p><h3 id="selected-pet-title">{selectedPet.name}</h3></div>
                   </header>
-                  <PetDetails pet={selectedPet} role={profile.role} userId={session.user.id} professionalName={profile.display_name} onPetChanged={(updatedPet, movedList = false) => { setPets((current) => current.map((item) => item.id === updatedPet.id ? updatedPet : item)); setSearchResults((current) => current?.map((item) => item.id === updatedPet.id ? updatedPet : item) || null); if (movedList) { setSelectedPetId(null); void loadData(); setNotice(updatedPet.status === 'active' ? 'La mascota volvió a la lista de mascotas activas.' : 'La mascota fue enviada a la lista de inactivas.') } }} onPetDeleted={() => { setSelectedPetId(null); setSearchResults(null); void loadData(); setNotice('La mascota y sus expedientes fueron eliminados.') }} />
+                  <Suspense fallback={<p>Cargando ficha…</p>}><PetDetails key={selectedPet.id} pet={selectedPet} role={profile.role} professionalName={profile.display_name} onPetChanged={(updatedPet, movedList = false) => { setPets((current) => current.map((item) => item.id === updatedPet.id ? updatedPet : item)); setSearchResults((current) => current?.map((item) => item.id === updatedPet.id ? updatedPet : item) || null); if (movedList) { setSelectedPetId(null); void loadData() } }} onPetDeleted={() => { setSelectedPetId(null); setSearchResults(null); void loadData() }} onRecordsChanged={() => void localData<{ activePets: number; inactivePets: number; clinicalRecords: number }>('summary').then(setDashboardCounts).catch((cause) => setError(String(cause)))} /></Suspense>
                 </section>
               ) : filteredPets.length === 0 ? <EmptyState icon={PawPrint} title="Sin resultados" text={search ? 'Prueba con otro término de búsqueda.' : 'Todavía no hay mascotas registradas.'} /> : (
                 <div className="table-wrap responsive-table pet-table-wrap"><table><thead><tr><th>Mascota</th><th>Tutor</th><th>Teléfono</th><th>Especie / raza</th><th>Estado</th><th>Registro</th><th className="actions-column">Acción</th></tr></thead><tbody>{filteredPets.map((pet) => <tr className="clickable-row" key={pet.id} tabIndex={0} onClick={() => setSelectedPetId(pet.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedPetId(pet.id) } }}><td data-label="Mascota"><div className="name-cell"><PetAvatar pet={pet} size={17} /><strong>{pet.name}</strong></div></td><td data-label="Tutor">{pet.guardian_name}</td><td data-label="Teléfono">{pet.guardian_phone || '—'}</td><td data-label="Especie / raza">{[pet.species, pet.breed].filter(Boolean).join(' · ') || '—'}</td><td data-label="Estado"><span className={`status ${pet.status}`}>{pet.status === 'active' ? 'Activo' : 'Deceso'}</span></td><td data-label="Registro">{formatDate(pet.created_at)}</td><td className="actions-column"><button className="text-button detail-button" onClick={() => setSelectedPetId(pet.id)} aria-label={`Ver detalle de ${pet.name}`}>Abrir ficha</button></td></tr>)}</tbody></table></div>
@@ -816,7 +695,8 @@ function Workspace({ session, onSignOut }: { session: Session; onSignOut: () => 
 
           {view === 'users' && profile.role === 'owner' && (
             <section className="panel page-panel">
-              <div className="page-actions"><div><p className="eyebrow">Administración</p><h2>Usuarios y roles</h2><p className="muted">Solo el dueño puede crear o eliminar accesos.</p></div><button className="button primary" onClick={() => { setNotice(''); setModal('create-user') }}><Plus size={18} /> Crear acceso</button></div>
+              <div className="page-actions"><div><p className="eyebrow">Administración</p><h2>Usuarios y roles</h2><p className="muted">Solo el dueño puede crear o eliminar accesos.</p></div><button className="button primary" disabled={!session.user.online} onClick={() => { setNotice(''); setModal('create-user') }}><Plus size={18} /> Crear acceso</button></div>
+              {usersError && <div className="alert error" role="alert"><span>{usersError}</span></div>}
               <div className="alert"><ShieldCheck size={18} /><span>Las cuentas pueden tener el rol Veterinario o Recepción. Al eliminarlas, su historial permanece.</span></div>
               <div className="table-wrap responsive-table"><table><thead><tr><th>Usuario</th><th>Rol</th><th>Estado</th><th>Registro</th><th className="actions-column">Acciones</th></tr></thead><tbody>{profiles.map((user) => <tr key={user.id}><td data-label="Usuario"><div className="name-cell"><span className="avatar table-avatar">{initials(user.display_name)}</span><strong>{user.display_name}</strong></div></td><td data-label="Rol">{roleLabels[user.role]}</td><td data-label="Estado"><span className={`status ${user.is_active ? 'active' : 'inactive'}`}>{user.is_active ? 'Activo' : 'Inactivo'}</span></td><td data-label="Registro">{formatDate(user.created_at)}</td><td className="actions-column" data-label="Acciones">{user.role === 'owner' ? <span className="muted">Protegido</span> : <button className="icon-button danger-icon" onClick={() => { setNotice(''); setUserToDelete(user) }} aria-label={`Eliminar a ${user.display_name}`} title="Eliminar usuario"><Trash2 size={17} /></button>}</td></tr>)}</tbody></table></div>
             </section>
@@ -832,57 +712,42 @@ function Workspace({ session, onSignOut }: { session: Session; onSignOut: () => 
 }
 
 export default function App() {
-  const [session, setSession] = useState<Session | null>(null)
+  const [user, setUser] = useState<LocalUser | null>(null)
   const [ready, setReady] = useState(false)
-  const [localReady, setLocalReady] = useState(false)
   const [localError, setLocalError] = useState('')
 
   useEffect(() => {
-    void supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session)
-      setReady(true)
-    })
-    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => setSession(nextSession))
-    return () => data.subscription.unsubscribe()
+    void currentLocalUser().then(setUser).catch((cause) => setLocalError(String(cause))).finally(() => setReady(true))
   }, [])
 
-  const connectLocalStorage = useCallback(async (activeSession: Session) => {
+  const connectLocalStorage = useCallback(async () => {
     setLocalError('')
     try {
-      await establishLocalSession(activeSession.access_token)
-      setLocalReady(true)
+      setUser(await currentLocalUser())
     } catch (error) {
       setLocalError(error instanceof Error ? error.message : 'No fue posible conectar con el almacenamiento local.')
     }
   }, [])
 
-  useEffect(() => {
-    if (session) void connectLocalStorage(session)
-    else {
-      setLocalReady(false)
-      setLocalError('')
-      void clearLocalSession()
-    }
-  }, [session, session?.access_token, connectLocalStorage])
-
   const signOut = useCallback(async () => {
     await clearLocalSession()
-    await supabase.auth.signOut()
-  }, [])
+    setUser(null)
+    setLocalError('')
+    if (user?.online) void supabase.auth.signOut({ scope: 'local' })
+  }, [user?.online])
 
   if (!ready) return <div className="app-loader"><span className="loader" /><p>Preparando acceso seguro…</p></div>
-  if (session && localError) {
+  if (localError) {
     return (
       <div className="app-loader local-error">
         <p className="form-error"><strong>El almacenamiento local no está disponible.</strong><br />{localError}</p>
         <p>Comprueba que abriste la aplicación desde la PC servidor o desde su dirección de red.</p>
         <div className="local-error-actions">
-          <button className="button primary" onClick={() => void connectLocalStorage(session)}>Reintentar</button>
+          <button className="button primary" onClick={() => void connectLocalStorage()}>Reintentar</button>
           <button className="button secondary" onClick={() => void signOut()}>Cerrar sesión</button>
         </div>
       </div>
     )
   }
-  if (session && !localReady) return <div className="app-loader"><span className="loader" /><p>Conectando archivos locales…</p></div>
-  return session ? <Workspace session={session} onSignOut={signOut} /> : <Login />
+  return user ? <Workspace session={{ user }} onSignOut={signOut} /> : <Login onLogin={setUser} />
 }

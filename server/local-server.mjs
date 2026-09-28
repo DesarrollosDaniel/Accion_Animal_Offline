@@ -6,7 +6,9 @@ import { randomBytes } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { assertTestEnvironment } from '../scripts/test-environment.mjs'
-import { createLocalPool, handleLocalApi, saveVerifiedProfile } from './local-api.mjs'
+import { createLocalPool, handleLocalApi } from './local-api.mjs'
+import { createLocalAuth } from './local-auth.mjs'
+import { LocalApiError, readJsonBody } from './local-writes.mjs'
 
 assertTestEnvironment()
 
@@ -58,7 +60,7 @@ function currentSession(req) {
   const id = parseCookies(req)[cookieName]
   const session = id && sessions.get(id)
   if (!session) return null
-  if (session.expiresAt <= Date.now()) {
+  if (session.expiresAt <= Date.now() || (session.validUntil && session.validUntil <= Date.now())) {
     sessions.delete(id)
     return null
   }
@@ -73,32 +75,16 @@ function requireSession(req, res) {
 
 function requireSameOrigin(req, res) {
   const origin = req.headers.origin
-  if (!origin || new URL(origin).host !== req.headers.host) {
+  let sameOrigin = false
+  try {
+    const parsed = new URL(origin)
+    sameOrigin = ['http:', 'https:'].includes(parsed.protocol) && parsed.host === req.headers.host
+  } catch {}
+  if (!sameOrigin) {
     json(res, 403, { error: 'Solicitud rechazada por seguridad.' })
     return false
   }
   return true
-}
-
-async function validateSupabaseUser(accessToken) {
-  try {
-    const headers = { apikey: publishableKey, Authorization: `Bearer ${accessToken}` }
-    const signal = AbortSignal.timeout(10_000)
-    const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, { headers, signal })
-    if (!userResponse.ok) return null
-    const user = await userResponse.json()
-    const profileUrl = new URL(`${supabaseUrl}/rest/v1/profiles`)
-    profileUrl.searchParams.set('id', `eq.${user.id}`)
-    profileUrl.searchParams.set('select', 'id,display_name,role,is_active')
-    const profileResponse = await fetch(profileUrl, { headers, signal })
-    if (!profileResponse.ok) return null
-    const [profile] = await profileResponse.json()
-    if (!profile?.is_active || !['owner', 'veterinarian', 'reception'].includes(profile.role)
-      || typeof profile.display_name !== 'string' || !profile.display_name.trim()) return null
-    return { userId: user.id, role: profile.role, displayName: profile.display_name }
-  } catch (error) {
-    throw Object.assign(new Error('SUPABASE_UNAVAILABLE'), { cause: error })
-  }
 }
 
 function decodeUploadedPath(pathname) {
@@ -153,30 +139,28 @@ async function serveFile(req, res, filePath, options = {}) {
 }
 
 async function handleSession(req, res, localPool) {
+  if (req.method === 'GET') {
+    const session = currentSession(req)
+    if (!session || !localPool) return json(res, 200, { user: null })
+    const { rows } = await localPool.query('SELECT role, is_active FROM aa_local.profiles WHERE id = $1', [session.userId])
+    if (!rows[0]?.is_active || rows[0].role !== session.role) return json(res, 200, { user: null })
+    return json(res, 200, { user: { id: session.userId, email: session.email, online: false } })
+  }
   if (!requireSameOrigin(req, res)) return
   if (req.method === 'DELETE') {
     const id = parseCookies(req)[cookieName]
     if (id) sessions.delete(id)
     return json(res, 200, { ok: true }, { 'Set-Cookie': `${cookieName}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0` })
   }
-  if (req.method !== 'POST') return json(res, 405, { error: 'Método no permitido.' }, { Allow: 'POST, DELETE' })
-  const authorization = req.headers.authorization || ''
-  if (!authorization.startsWith('Bearer ')) return json(res, 401, { error: 'Sesión de Supabase ausente.' })
-  const accessToken = authorization.slice(7)
-  const user = await validateSupabaseUser(accessToken)
-  if (!user) return json(res, 401, { error: 'La sesión o el perfil no son válidos.' })
-  await saveVerifiedProfile(localPool, user)
-  const id = randomBytes(32).toString('base64url')
-  const expiresAt = Date.now() + 55 * 60 * 1000
-  sessions.set(id, { ...user, expiresAt })
-  json(res, 200, { ok: true, role: user.role }, {
-    'Set-Cookie': `${cookieName}=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=3300`,
-  })
+  return json(res, 405, { error: 'Método no permitido.' }, { Allow: 'GET, DELETE' })
 }
 
-async function handleUploaded(req, res, url, storageRoot) {
+async function handleUploaded(req, res, url, storageRoot, localPool) {
   const session = requireSession(req, res)
   if (!session) return
+  if (!localPool) return json(res, 503, { error: 'La base de datos local no está configurada.' })
+  const { rows } = await localPool.query('SELECT role, is_active FROM aa_local.profiles WHERE id = $1', [session.userId])
+  if (!rows[0]?.is_active || rows[0].role !== session.role) return json(res, 403, { error: 'Tu perfil local no está activo.' })
   const { relative, target } = requestedStoragePath(storageRoot, url.pathname)
   if (req.method === 'GET' || req.method === 'HEAD') {
     const resolved = await realpath(target)
@@ -188,10 +172,7 @@ async function handleUploaded(req, res, url, storageRoot) {
   if (!canWrite(session)) return json(res, 403, { error: 'Tu rol no permite modificar este archivo.' })
 
   if (req.method === 'DELETE') {
-    const resolved = await realpath(target)
-    if (!contained(storageRoot, resolved)) throw new Error('INVALID_PATH')
-    await unlink(resolved)
-    return json(res, 200, { ok: true })
+    return json(res, 409, { error: 'Los archivos físicos se conservan hasta confirmar la sincronización. Elimina su registro desde la ficha.' })
   }
 
   const extension = path.extname(target).toLowerCase()
@@ -265,6 +246,7 @@ async function start() {
       throw error
     }
   }
+  const authenticate = createLocalAuth(localPool, supabaseUrl, publishableKey)
 
   setInterval(() => {
     const now = Date.now()
@@ -290,14 +272,42 @@ async function start() {
         })
       }
       if (url.pathname === '/api/local-session') return await handleSession(req, res, localPool)
+      if (['/api/local-auth', '/api/local-auth/verify'].includes(url.pathname)) {
+        if (req.method !== 'POST') return json(res, 405, { error: 'Método no permitido.' })
+        if (!requireSameOrigin(req, res)) return
+        const verifying = url.pathname.endsWith('/verify')
+        const active = verifying ? currentSession(req) : null
+        if (verifying && !active) return json(res, 401, { error: 'Inicia sesión.' })
+        const input = await readJsonBody(req)
+        if (!input || typeof input !== 'object' || Array.isArray(input)) {
+          throw new LocalApiError(400, 'Se requiere un formulario de acceso válido.')
+        }
+        if (verifying) input.email = active.email
+        const user = await authenticate(input, req.socket.remoteAddress, active?.userId)
+        if (verifying) {
+          active.verifiedAt = Date.now()
+          return json(res, 200, { ok: true })
+        }
+        const previous = parseCookies(req)[cookieName]
+        if (previous) sessions.delete(previous)
+        const id = randomBytes(32).toString('base64url')
+        const expiresAt = Math.min(Date.now() + 8 * 60 * 60 * 1000, user.validUntil)
+        const { cloudSession, ...identity } = user
+        sessions.set(id, { ...identity, expiresAt, verifiedAt: Date.now() })
+        return json(res, 200, { user: { id: user.userId, email: user.email, online: Boolean(cloudSession) }, cloudSession }, {
+          'Set-Cookie': `${cookieName}=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor((expiresAt - Date.now()) / 1000)}${req.socket.encrypted ? '; Secure' : ''}`,
+        })
+      }
       if (url.pathname.startsWith('/api/local/')) {
         return await handleLocalApi(req, res, url, localPool, currentSession, storageRoot)
       }
       if (rawPathname.startsWith('/uploaded/')) {
-        return await handleUploaded(req, res, { ...url, pathname: rawPathname }, storageRoot)
+        return await handleUploaded(req, res, { ...url, pathname: rawPathname }, storageRoot, localPool)
       }
       return await serveStatic(req, res, url)
     } catch (error) {
+      if (error instanceof LocalApiError) return json(res, error.status, { error: error.message })
+      if (error?.code === '42P01') return json(res, 503, { error: 'Falta aplicar la migración local 003 para habilitar el acceso sin internet.' })
       if (error?.code === 'ENOENT') return json(res, 404, { error: 'Archivo no encontrado.' })
       if (error?.message === 'INVALID_PATH') return json(res, 400, { error: 'Ruta inválida.' })
       if (error?.message === 'UPLOAD_TOO_LARGE') return json(res, 413, { error: 'El archivo supera el límite configurado.' })

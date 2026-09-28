@@ -43,6 +43,22 @@ test('rechaza perfiles locales inactivos', async () => {
   assert.equal(calls.length, 1)
 })
 
+test('perfiles locales no exponen hashes y recepción no lista usuarios', async () => {
+  const result = await request('/api/local/profile')
+  assert.equal(result.res.status, 200)
+  assert.match(result.calls[1].sql, /SELECT id, display_name, role, is_active, created_at/)
+  assert.equal((await request('/api/local/profiles')).res.status, 403)
+})
+
+test('el servidor exige reconfirmación reciente para borrar mascotas y expedientes', async () => {
+  for (const resource of ['pets', 'clinical-records']) {
+    const result = await request(`/api/local/${resource}/${petId}`, { method: 'DELETE', origin: 'http://localhost' })
+    assert.equal(result.res.status, 403)
+    assert.match(result.res.body.error, /contraseña/)
+    assert.equal(result.calls.length, 1)
+  }
+})
+
 test('consulta mascotas con valores parametrizados y paginación acotada', async () => {
   const { res, calls } = await request('/api/local/pets?status=active&limit=20&offset=5', { rows: { pets: [{ id: petId }] } })
   assert.equal(res.status, 200)
@@ -114,6 +130,7 @@ test('no conecta si falta la contraseña y limita usuario, host y nombre de base
   const pool = createLocalPool({ AA_DB_PASSWORD: 'x', AA_DB_NAME: 'accion_animal_dev' })
   assert.equal(pool.options.user, 'aa_local_app')
   assert.equal(pool.options.host, '127.0.0.1')
+  assert.equal(pool.options.ssl, false)
   assert.equal(pool.options.types.getTypeParser(1082, 'text')('2022-05-10'), '2022-05-10')
   assert.equal(pool.options.types.getTypeParser(1700, 'text')('12.500'), 12.5)
   await pool.end()

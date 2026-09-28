@@ -1,14 +1,16 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Camera, ChevronDown, ChevronLeft, ChevronRight, FileText, Image as ImageIcon, Info, MoreHorizontal, PawPrint, Pencil, Plus, RotateCcw, ShieldCheck, Stethoscope, Trash2, X } from 'lucide-react'
-import { supabase } from '../lib/supabase'
-import { deleteLocalFile, localFileUrl, uploadLocalFile } from '../lib/localFiles'
+import { localFileUrl, uploadLocalFile } from '../lib/localFiles'
+import { verifyLocalPassword } from '../lib/localAuth'
+import { localData, localWrite } from '../lib/localApi'
 import { vaccinesForSpecies } from '../lib/vaccines'
 
 type Role = 'owner' | 'veterinarian' | 'reception'
 
 export interface DetailedPet {
   id: string
+  row_version: string
   legacy_id: number | null
   name: string
   birth_date: string | null
@@ -32,6 +34,7 @@ export interface DetailedPet {
 
 interface ClinicalFile {
   id: string
+  row_version: string
   kind: 'photo' | 'document'
   object_path: string
   original_name: string
@@ -41,6 +44,7 @@ interface ClinicalFile {
 
 interface ClinicalRecord {
   id: string
+  row_version: string
   occurred_at: string
   history: string | null
   physical_exam: string | null
@@ -72,12 +76,14 @@ interface WeightRecord {
 
 interface Vaccination {
   id: string
+  row_version?: string
   vaccine_name: string
   administered_on: string
 }
 
 interface PetNote {
   id: string
+  row_version: string
   body: string
 }
 
@@ -151,9 +157,12 @@ function Observation({ label, value }: { label: string; value: string | null }) 
   return <div><span>{label}</span><p>{value}</p></div>
 }
 
-function PetEditForm({ pet, latestWeight, vaccinations, note, onSaved, onCancel }: { pet: DetailedPet; latestWeight: WeightRecord | null; vaccinations: Vaccination[]; note: PetNote | null; onSaved: (pet: DetailedPet) => void; onCancel: () => void }) {
+function PetEditForm({ pet, latestWeight, vaccinations, note, onSaved, onCancel }: { pet: DetailedPet; latestWeight: WeightRecord | null; vaccinations: Vaccination[]; note: PetNote | null; onSaved: (pet: DetailedPet, refresh?: boolean) => void; onCancel: () => void }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [savedVaccinations, setSavedVaccinations] = useState(vaccinations)
+  const [savedNote, setSavedNote] = useState(note)
+  const [savedWeight, setSavedWeight] = useState(latestWeight?.weight_kg)
   const availableVaccines = [...new Set([...vaccinesForSpecies(pet.species), ...vaccinations.map((entry) => entry.vaccine_name)])]
   const [vaccinationRows, setVaccinationRows] = useState<Vaccination[]>(() => {
     const rows = [...vaccinations]
@@ -219,47 +228,36 @@ function PetEditForm({ pet, latestWeight, vaccinations, note, onSaved, onCancel 
       guardian_number: String(data.get('guardian_number') || '').trim() || null,
       referral_source: String(data.get('referral_source') || '').trim() || null,
     }
-    const { error: updateError } = await supabase.from('pets').update(changes).eq('id', pet.id)
-    if (updateError) {
-      setError(updateError.message)
-      setSaving(false)
-      return
-    }
-    if (weightValue && Number(weightValue) !== latestWeight?.weight_kg) {
-      const { error: weightError } = await supabase.from('weight_records').insert({ pet_id: pet.id, weight_kg: Number(weightValue), measured_at: new Date().toISOString(), notes: 'Peso actualizado desde la ficha de la mascota' })
-      if (weightError) {
-        onSaved({ ...pet, ...changes } as DetailedPet)
-        setError(`La información se guardó, pero el peso no pudo actualizarse: ${weightError.message}`)
-        setSaving(false)
-        return
+    let updated: DetailedPet | null = null
+    try {
+      updated = await localWrite<DetailedPet>(`pets/${pet.id}`, 'PATCH', { expected_version: pet.row_version, changes })
+      onSaved(updated, false)
+      if (weightValue && Number(weightValue) !== savedWeight) {
+        await localWrite(`pets/${pet.id}/weight-records`, 'POST', { weight_kg: Number(weightValue), measured_at: new Date().toISOString(), notes: 'Peso actualizado desde la ficha de la mascota' })
+        setSavedWeight(Number(weightValue))
       }
-    }
-    if (observation !== (note?.body || '')) {
-      const { error: noteError } = note
-        ? await supabase.from('pet_notes').update({ body: observation }).eq('id', note.id)
-        : await supabase.from('pet_notes').insert({ pet_id: pet.id, body: observation })
-      if (noteError) {
-        onSaved({ ...pet, ...changes } as DetailedPet)
-        setError(`La información se guardó, pero la observación no pudo actualizarse: ${noteError.message}`)
-        setSaving(false)
-        return
+      if (observation !== (savedNote?.body || '')) {
+        setSavedNote(await localWrite<PetNote>(savedNote ? `pet-notes/${savedNote.id}` : `pets/${pet.id}/pet-notes`, savedNote ? 'PATCH' : 'POST', savedNote ? { expected_version: savedNote.row_version, changes: { body: observation } } : { body: observation }))
       }
-    }
-    const { error: vaccinationError } = selectedVaccinations.length
-      ? await supabase.from('vaccinations').upsert(selectedVaccinations.map((entry) => ({ ...entry, pet_id: pet.id })), { onConflict: 'id' })
-      : { error: null }
-    const removedIds = vaccinations.filter((original) => !selectedVaccinations.some((entry) => entry.id === original.id)).map((entry) => entry.id)
-    const { error: vaccinationDeleteError } = removedIds.length
-      ? await supabase.from('vaccinations').delete().in('id', removedIds)
-      : { error: null }
-    if (vaccinationError || vaccinationDeleteError) {
-      onSaved({ ...pet, ...changes } as DetailedPet)
-      setError(`La información se guardó, pero las vacunas no pudieron actualizarse: ${vaccinationError?.message || vaccinationDeleteError?.message}`)
+      for (const entry of selectedVaccinations) {
+        const original = savedVaccinations.find((item) => item.id === entry.id)
+        if (original && entry.vaccine_name === original.vaccine_name && entry.administered_on === original.administered_on) continue
+        const fields = { vaccine_name: entry.vaccine_name, administered_on: entry.administered_on }
+        const saved = await localWrite<Vaccination>(original ? `vaccinations/${original.id}` : `pets/${pet.id}/vaccinations`, original ? 'PATCH' : 'POST', original ? { expected_version: original.row_version, changes: fields } : fields)
+        setSavedVaccinations((current) => [...current.filter((item) => item.id !== entry.id), saved])
+        setVaccinationRows((current) => current.map((item) => item.id === entry.id ? saved : item))
+      }
+      for (const removed of savedVaccinations.filter((item) => !selectedVaccinations.some((entry) => entry.id === item.id))) {
+        await localWrite(`vaccinations/${removed.id}`, 'DELETE', { expected_version: removed.row_version })
+        setSavedVaccinations((current) => current.filter((item) => item.id !== removed.id))
+      }
+      onSaved(updated)
+      onCancel()
+    } catch (cause) {
+      setError(`${updated ? 'Los datos de la mascota se guardaron; falta completar los datos relacionados. ' : ''}${cause instanceof Error ? cause.message : 'No fue posible guardar los cambios.'}`)
+    } finally {
       setSaving(false)
-      return
     }
-    onSaved({ ...pet, ...changes } as DetailedPet)
-    onCancel()
   }
 
   return <form className="clinical-form pet-edit-form" onSubmit={submit}>
@@ -290,13 +288,39 @@ function PetEditForm({ pet, latestWeight, vaccinations, note, onSaved, onCancel 
       <label>Número<input name="guardian_number" defaultValue={pet.guardian_number || ''} maxLength={40} /></label>
       <label className="span-2">Cómo conoció la clínica<input name="referral_source" defaultValue={pet.referral_source || ''} maxLength={200} /></label>
       {error && <p className="form-error span-2" role="alert">{error}</p>}
-      <div className="form-actions span-2"><button type="button" className="button secondary" onClick={onCancel}>Cancelar</button><button type="submit" className="button primary" disabled={saving}>{saving ? 'Guardando…' : 'Guardar cambios'}</button></div>
+      <div className="form-actions span-2"><button type="button" className="button secondary" onClick={onCancel} disabled={saving}>Cancelar</button><button type="submit" className="button primary" disabled={saving}>{saving ? 'Guardando…' : 'Guardar cambios'}</button></div>
     </div>
   </form>
 }
 
-function ClinicalRecordCard({ record, canEdit, onEdit, onDelete, onDeleteFile }: { record: ClinicalRecord; canEdit: boolean; onEdit: () => void; onDelete: () => void; onDeleteFile: (file: ClinicalFile) => void }) {
+function ClinicalRecordCard({ record, canEdit, onEdit, onDelete, onDeleteFile }: { record: ClinicalRecord; canEdit: boolean; onEdit: () => void; onDelete: () => void; onDeleteFile: (file: ClinicalFile) => Promise<boolean> }) {
   const [selectedPhotoIndex, setSelectedPhotoIndex] = useState<number | null>(null)
+  const [files, setFiles] = useState<ClinicalFile[]>([])
+  const [filesLoaded, setFilesLoaded] = useState(false)
+  const [loadingFiles, setLoadingFiles] = useState(false)
+  const [filesError, setFilesError] = useState('')
+  const [moreFiles, setMoreFiles] = useState(false)
+  async function loadFiles(append = false) {
+    if (loadingFiles) return
+    setLoadingFiles(true)
+    setFilesError('')
+    try {
+      const page = await localData<ClinicalFile[]>(`clinical-records/${record.id}/files?limit=50&offset=${append ? files.length : 0}`)
+      setFiles((current) => append ? [...current, ...page] : page)
+      setMoreFiles(page.length === 50)
+      setFilesLoaded(true)
+    } catch (cause) {
+      setFilesError(cause instanceof Error ? cause.message : 'No fue posible cargar los adjuntos.')
+    } finally {
+      setLoadingFiles(false)
+    }
+  }
+  async function removeFile(file: ClinicalFile) {
+    if (await onDeleteFile(file)) {
+      setFiles((current) => current.filter((item) => item.id !== file.id))
+      setSelectedPhotoIndex(null)
+    }
+  }
   const observations = [
     ['Temperatura', record.temperature_observation],
     ['Frecuencia cardiaca', record.heart_rate_observation],
@@ -305,22 +329,25 @@ function ClinicalRecordCard({ record, canEdit, onEdit, onDelete, onDeleteFile }:
     ['Ganglios linfáticos', record.lymph_nodes_observation],
     ['Llenado capilar', record.capillary_refill_observation],
   ] as const
-  const photos = (record.clinical_files || []).filter((file) => file.kind === 'photo').flatMap((file) => {
+  const photos = files.filter((file) => file.kind === 'photo').flatMap((file) => {
     const url = localFileUrl(file.object_path)
     return url ? [{ ...file, url }] : []
   })
-  const documents = (record.clinical_files || []).filter((file) => file.kind === 'document')
+  const documents = files.filter((file) => file.kind === 'document')
   const selectedPhoto = selectedPhotoIndex === null ? null : photos[selectedPhotoIndex]
   const changePhoto = (offset: number) => setSelectedPhotoIndex((current) => current === null ? 0 : (current + offset + photos.length) % photos.length)
 
   return (
-    <details className="clinical-record-card">
+    <details className="clinical-record-card" onToggle={(event) => { if (event.currentTarget.open && !filesLoaded) void loadFiles() }}>
       <summary>
         <span className="record-date"><Stethoscope size={18} /><span><strong>{formatDate(record.occurred_at, true)}</strong><small>{record.attending_professional || 'Profesional no indicado'}</small></span></span>
         <span className="record-summary">{record.provisional_diagnosis || record.history || 'Consulta clínica'}</span>
         <ChevronDown size={18} className="details-chevron" />
       </summary>
       <div className="record-body">
+        {filesError && <p className="form-error" role="alert">{filesError}<button type="button" className="text-button" onClick={() => void loadFiles()}>Reintentar adjuntos</button></p>}
+        {loadingFiles && <p role="status">Cargando adjuntos…</p>}
+        {moreFiles && <button type="button" className="text-button" disabled={loadingFiles} onClick={() => void loadFiles(true)}>Cargar más adjuntos</button>}
         {canEdit && <div className="record-actions"><details className="action-menu"><summary className="icon-button action-menu-trigger" aria-label="Acciones del expediente" title="Acciones"><MoreHorizontal size={19} /></summary><div className="action-menu-popover" role="menu"><button type="button" role="menuitem" onClick={onEdit}><Pencil size={15} /> Editar expediente</button><button type="button" role="menuitem" className="destructive" onClick={onDelete}><Trash2 size={15} /> Eliminar expediente</button></div></details></div>}
         <section className="record-text-grid">
           <Observation label="Historia clínica" value={record.history} />
@@ -340,7 +367,7 @@ function ClinicalRecordCard({ record, canEdit, onEdit, onDelete, onDeleteFile }:
           {photos.length > 0 && <details className="record-files-group">
             <summary><span><ImageIcon size={17} /> Fotos <small>{photos.length}</small></span><ChevronDown size={17} className="media-chevron" /></summary>
             <div className="record-photos">
-              {photos.map((photo, index) => <div className="record-file-item" key={photo.id}><button type="button" onClick={() => setSelectedPhotoIndex(index)} aria-label={`Abrir ${photo.original_name} en la galería`}><img src={photo.url} alt={photo.original_name} loading="lazy" /><span><strong>{photo.original_name}</strong><small>{fileSize(photo.size_bytes)}</small></span></button>{canEdit && <button type="button" className="file-delete" onClick={() => onDeleteFile(photo)} aria-label={`Eliminar ${photo.original_name}`} title="Eliminar foto"><Trash2 size={15} /></button>}</div>)}
+              {photos.map((photo, index) => <div className="record-file-item" key={photo.id}><button type="button" onClick={() => setSelectedPhotoIndex(index)} aria-label={`Abrir ${photo.original_name} en la galería`}><img src={photo.url} alt={photo.original_name} loading="lazy" /><span><strong>{photo.original_name}</strong><small>{fileSize(photo.size_bytes)}</small></span></button>{canEdit && <button type="button" className="file-delete" onClick={() => void removeFile(photo)} aria-label={`Eliminar ${photo.original_name}`} title="Eliminar foto"><Trash2 size={15} /></button>}</div>)}
             </div>
           </details>}
           {documents.length > 0 && <details className="record-files-group">
@@ -348,7 +375,7 @@ function ClinicalRecordCard({ record, canEdit, onEdit, onDelete, onDeleteFile }:
             <div className="record-documents">
               {documents.map((file) => {
                 const url = localFileUrl(file.object_path)
-                return url && <div className="record-file-item" key={file.id}><a href={url} target="_blank" rel="noreferrer"><FileText size={17} /><span><strong>{file.original_name}</strong><small>{fileSize(file.size_bytes)}</small></span></a>{canEdit && <button type="button" className="file-delete" onClick={() => onDeleteFile(file)} aria-label={`Eliminar ${file.original_name}`} title="Eliminar archivo"><Trash2 size={15} /></button>}</div>
+                return url && <div className="record-file-item" key={file.id}><a href={url} target="_blank" rel="noreferrer"><FileText size={17} /><span><strong>{file.original_name}</strong><small>{fileSize(file.size_bytes)}</small></span></a>{canEdit && <button type="button" className="file-delete" onClick={() => void removeFile(file)} aria-label={`Eliminar ${file.original_name}`} title="Eliminar archivo"><Trash2 size={15} /></button>}</div>
               })}
             </div>
           </details>}
@@ -382,19 +409,8 @@ function PasswordDeleteDialog({ title, description, confirmLabel, onClose, onCon
     setDeleting(true)
     setError('')
     const password = String(new FormData(event.currentTarget).get('password') || '')
-    const { data: { user }, error: userError } = await supabase.auth.getUser()
-    if (userError || !user?.email) {
-      setError('No fue posible verificar la cuenta actual.')
-      setDeleting(false)
-      return
-    }
-    const { error: passwordError } = await supabase.auth.signInWithPassword({ email: user.email, password })
-    if (passwordError) {
-      setError('La contraseña es incorrecta.')
-      setDeleting(false)
-      return
-    }
     try {
+      await verifyLocalPassword(password)
       await onConfirm()
       onClose()
     } catch (deleteError) {
@@ -421,9 +437,8 @@ function PasswordDeleteDialog({ title, description, confirmLabel, onClose, onCon
   )
 }
 
-function ClinicalRecordForm({ pet, userId, professionalName, record, onSaved, onCancel }: {
+function ClinicalRecordForm({ pet, professionalName, record, onSaved, onCancel }: {
   pet: DetailedPet
-  userId: string
   professionalName: string
   record?: ClinicalRecord
   onSaved: () => Promise<void>
@@ -431,6 +446,11 @@ function ClinicalRecordForm({ pet, userId, professionalName, record, onSaved, on
 }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [savedRecord, setSavedRecord] = useState<ClinicalRecord | null>(null)
+  const [weightSaved, setWeightSaved] = useState(false)
+  const [uploadedFiles, setUploadedFiles] = useState(new Map<File, string>())
+  const [registeredFiles, setRegisteredFiles] = useState(new Set<File>())
+  const [creationUnconfirmed, setCreationUnconfirmed] = useState(false)
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -447,8 +467,6 @@ function ClinicalRecordForm({ pet, userId, professionalName, record, onSaved, on
     const fileDirectory = documents.length ? `uploaded/clinicos/${petFolder}/archivos/${folderStamp}` : null
     const estimatedCost = String(data.get('estimated_cost') || '').trim()
     const weight = String(data.get('weight_kg') || '').trim()
-    let createdRecordId: string | null = null
-    const uploadedPaths: string[] = []
     const recordValues = {
       occurred_at: occurredAt,
       history: String(data.get('history') || '').trim() || null,
@@ -471,70 +489,48 @@ function ClinicalRecordForm({ pet, userId, professionalName, record, onSaved, on
       diarrhea_notes: String(data.get('diarrhea_notes') || '').trim() || null,
     }
 
+    let recordWasSaved = Boolean(savedRecord || record)
     try {
-      let recordId = record?.id
-      if (recordId) {
-        const { error: updateError } = await supabase.from('clinical_records').update(recordValues).eq('id', recordId)
-        if (updateError) throw new Error(updateError.message)
-      } else {
-        const { data: inserted, error: insertError } = await supabase.from('clinical_records').insert({
-          ...recordValues,
-          pet_id: pet.id,
-          attended_by: userId,
-          legacy_photo_directory: photoDirectory,
-          legacy_file_directory: fileDirectory,
-        }).select('id').single()
-        if (insertError || !inserted) throw new Error(insertError?.message || 'No fue posible crear el expediente.')
-        recordId = inserted.id
-        createdRecordId = inserted.id
+      const currentRecord = savedRecord || record
+      const saved = await localWrite<ClinicalRecord>(currentRecord ? `clinical-records/${currentRecord.id}` : `pets/${pet.id}/clinical-records`, currentRecord ? 'PATCH' : 'POST', currentRecord ? { expected_version: currentRecord.row_version, changes: recordValues } : { record: recordValues, weight: weight ? { weight_kg: Number(weight) } : null })
+      setSavedRecord(saved)
+      recordWasSaved = true
+      if (!currentRecord) setWeightSaved(true)
+      if (currentRecord && weight && !weightSaved) {
+        await localWrite(`pets/${pet.id}/weight-records`, 'POST', { weight_kg: Number(weight), measured_at: occurredAt, notes: `Registrado con el expediente ${saved.id}` })
+        setWeightSaved(true)
       }
-
       const pendingFiles = [
         ...photos.map((file, index) => ({ file, kind: 'photo' as const, directory: photoDirectory!, index })),
         ...documents.map((file, index) => ({ file, kind: 'document' as const, directory: fileDirectory!, index })),
       ]
-      const metadata = []
       for (const item of pendingFiles) {
-        const objectPath = `${item.directory}/${String(item.index + 1).padStart(2, '0')}-${safeFileName(item.file.name)}`
-        const storedPath = await uploadLocalFile(objectPath, item.file)
-        uploadedPaths.push(storedPath)
-        metadata.push({
-          clinical_record_id: recordId,
-          kind: item.kind,
-          object_path: storedPath,
-          original_name: item.file.name,
-          mime_type: item.file.type || 'application/octet-stream',
-          size_bytes: item.file.size,
+        if (registeredFiles.has(item.file)) continue
+        let storedPath = uploadedFiles.get(item.file)
+        if (!storedPath) {
+          storedPath = await uploadLocalFile(`${item.directory}/${randomUuid()}-${safeFileName(item.file.name)}`, item.file)
+          setUploadedFiles((current) => new Map(current).set(item.file, storedPath!))
+        }
+        await localWrite(`clinical-records/${saved.id}/files`, 'POST', {
+          kind: item.kind, object_path: storedPath, original_name: item.file.name,
+          mime_type: item.file.type || 'application/octet-stream', size_bytes: item.file.size,
         })
-      }
-      if (metadata.length) {
-        const { error: filesError } = await supabase.from('clinical_files').insert(metadata)
-        if (filesError) throw new Error(filesError.message)
-      }
-      if (weight) {
-        const numericWeight = Number(weight)
-        if (!Number.isFinite(numericWeight) || numericWeight <= 0) throw new Error('El peso debe ser mayor que cero.')
-        const { error: weightError } = await supabase.from('weight_records').insert({
-          pet_id: pet.id,
-          measured_at: occurredAt,
-          weight_kg: numericWeight,
-          notes: `Registrado con el expediente ${recordId}`,
-        })
-        if (weightError) throw new Error(weightError.message)
+        setRegisteredFiles((current) => new Set(current).add(item.file))
       }
       await onSaved()
       onCancel()
     } catch (caught) {
-      await Promise.all(uploadedPaths.map((storedPath) => deleteLocalFile(storedPath)))
-      if (createdRecordId) await supabase.from('clinical_records').delete().eq('id', createdRecordId)
-      setError(caught instanceof Error ? caught.message : 'No fue posible guardar el expediente.')
+      // Keep saved records and physical uploads on failure: a lost response must not erase clinical data.
+      setCreationUnconfirmed(!recordWasSaved)
+      setError(`${recordWasSaved ? 'El expediente está guardado; puedes reintentar los adjuntos pendientes. ' : 'No se pudo confirmar el alta. Cierra el formulario y revisa el historial antes de crear otro expediente. '}${caught instanceof Error ? caught.message : 'No fue posible guardar el expediente.'}`)
+      await onSaved()
       setSaving(false)
     }
   }
 
   return (
     <form className="clinical-form" onSubmit={submit}>
-      <div className="clinical-form-header"><div><p className="eyebrow">{record ? 'Edición' : 'Nuevo registro'}</p><h3>Expediente médico</h3></div><button type="button" className="icon-button" onClick={onCancel} aria-label="Cerrar formulario"><X size={19} /></button></div>
+      <div className="clinical-form-header"><div><p className="eyebrow">{record ? 'Edición' : 'Nuevo registro'}</p><h3>Expediente médico</h3></div><button type="button" className="icon-button" onClick={onCancel} disabled={saving} aria-label="Cerrar formulario"><X size={19} /></button></div>
       <div className="clinical-form-grid">
         <label>Fecha y hora<input name="occurred_at" type="datetime-local" defaultValue={localDateTimeValue(record?.occurred_at)} required /></label>
         <label>Profesional responsable<input name="attending_professional" defaultValue={record?.attending_professional || professionalName} maxLength={200} /></label>
@@ -559,21 +555,21 @@ function ClinicalRecordForm({ pet, userId, professionalName, record, onSaved, on
         <div className="form-section-title span-2"><span>Fotos y documentos locales</span></div>
         <label>Fotografías<input name="photos" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/bmp" multiple /></label>
         <label>Documentos<input name="documents" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.pptx,video/mp4" multiple /></label>
-        <p className="form-note span-2"><FileText size={17} /> {record ? 'Los archivos seleccionados se agregarán al expediente; los actuales se conservan hasta que los elimines.' : 'Se guardarán en la PC servidor bajo uploaded/clinicos/ID-DE-MASCOTA/... y Supabase conservará sus rutas.'}</p>
+        <p className="form-note span-2"><FileText size={17} /> {record ? 'Los archivos seleccionados se agregarán al expediente; los actuales se conservan hasta que los elimines.' : 'Adjuntos privados de esta consulta. Máximo 50 MB por archivo.'}</p>
         {error && <p className="form-error span-2" role="alert">{error}</p>}
-        <div className="form-actions span-2"><button type="button" className="button secondary" onClick={onCancel}>Cancelar</button><button type="submit" className="button primary" disabled={saving}>{saving ? 'Guardando expediente…' : record ? 'Guardar cambios' : 'Guardar expediente'}</button></div>
+        <div className="form-actions span-2"><button type="button" className="button secondary" onClick={onCancel} disabled={saving}>Cancelar</button><button type="submit" className="button primary" disabled={saving || creationUnconfirmed}>{saving ? 'Guardando expediente…' : record ? 'Guardar cambios' : 'Guardar expediente'}</button></div>
       </div>
     </form>
   )
 }
 
-export function PetDetails({ pet, role, userId, professionalName, onPetChanged, onPetDeleted }: {
+export function PetDetails({ pet, role, professionalName, onPetChanged, onPetDeleted, onRecordsChanged }: {
   pet: DetailedPet
   role: Role
-  userId: string
   professionalName: string
   onPetChanged: (pet: DetailedPet, movedList?: boolean) => void
   onPetDeleted: () => void
+  onRecordsChanged: () => void
 }) {
   const [records, setRecords] = useState<ClinicalRecord[]>([])
   const [latestWeight, setLatestWeight] = useState<WeightRecord | null>(null)
@@ -618,7 +614,6 @@ export function PetDetails({ pet, role, userId, professionalName, onPetChanged, 
       return
     }
 
-    const previousPath = pet.photo_path
     const folder = String(pet.legacy_id || pet.id)
     const target = `uploaded/mascotas/${folder}/${Date.now()}-${safeFileName(file.name)}`
     setChangingPhoto(true)
@@ -626,34 +621,11 @@ export function PetDetails({ pet, role, userId, professionalName, onPetChanged, 
     let storedPath = ''
     try {
       storedPath = await uploadLocalFile(target, file)
-      const { data, error: updateError } = await supabase
-        .from('pets')
-        .update({ photo_path: storedPath })
-        .eq('id', pet.id)
-        .select('photo_path')
-        .single()
-      if (updateError || !data?.photo_path) throw new Error(updateError?.message || 'No fue posible actualizar la mascota.')
-
-      onPetChanged({ ...pet, photo_path: data.photo_path })
-      if (!previousPath || previousPath === data.photo_path) {
-        setPhotoMessage('Foto actualizada.')
-        return
-      }
-
-      const [petUses, clinicalUses] = await Promise.all([
-        supabase.from('pets').select('id', { count: 'exact', head: true }).eq('photo_path', previousPath).neq('id', pet.id),
-        supabase.from('clinical_files').select('id', { count: 'exact', head: true }).eq('object_path', previousPath),
-      ])
-      if (petUses.error || clinicalUses.error) {
-        setPhotoMessage('Foto actualizada; no se eliminó la anterior porque no se pudo comprobar si estaba compartida.')
-      } else if ((petUses.count || 0) + (clinicalUses.count || 0) > 0) {
-        setPhotoMessage('Foto actualizada; la anterior se conservó porque otro registro también la utiliza.')
-      } else {
-        const deleted = await deleteLocalFile(previousPath)
-        setPhotoMessage(deleted ? 'Foto actualizada y archivo anterior eliminado.' : 'Foto actualizada; el archivo anterior no estaba disponible para eliminarse.')
-      }
+      const updated = await localWrite<DetailedPet>(`pets/${pet.id}`, 'PATCH', { expected_version: pet.row_version, changes: { photo_path: storedPath } })
+      onPetChanged(updated)
+      setPhotoMessage('Foto actualizada. La anterior se conserva hasta confirmar la sincronización.')
     } catch (changeError) {
-      if (storedPath) await deleteLocalFile(storedPath)
+      // Preserve an upload when its database response may have been lost.
       setPhotoMessage(changeError instanceof Error ? changeError.message : 'No fue posible cambiar la foto.')
     } finally {
       setChangingPhoto(false)
@@ -661,32 +633,32 @@ export function PetDetails({ pet, role, userId, professionalName, onPetChanged, 
     }
   }
 
-  const loadRecords = useCallback(async () => {
+  const [hasMore, setHasMore] = useState(false)
+  const loadRecords = useCallback(async (append = false) => {
     setLoading(true)
     setError('')
-    const [recordResult, weightResult, vaccinationResult, noteResult] = await Promise.all([
-      supabase.from('clinical_records').select(`
-        id, occurred_at, history, physical_exam, provisional_diagnosis, prognosis,
-        treatment, estimated_cost, budget_notes, attending_professional,
-        temperature_observation, heart_rate_observation, respiratory_rate_observation,
-        hydration_observation, lymph_nodes_observation, capillary_refill_observation,
-        vomiting, vomiting_notes, diarrhea, diarrhea_notes,
-        legacy_photo_directory, legacy_file_directory,
-        clinical_files (id, kind, object_path, original_name, mime_type, size_bytes)
-      `).eq('pet_id', pet.id).order('occurred_at', { ascending: false }).limit(200),
-      supabase.from('weight_records').select('weight_kg, measured_at').eq('pet_id', pet.id).order('measured_at', { ascending: false }).limit(1).maybeSingle(),
-      supabase.from('vaccinations').select('id, vaccine_name, administered_on').eq('pet_id', pet.id).order('administered_on', { ascending: false }),
-      supabase.from('pet_notes').select('id, body').eq('pet_id', pet.id).order('created_at', { ascending: false }).limit(1).maybeSingle(),
-    ])
-    if (recordResult.error || weightResult.error || vaccinationResult.error || noteResult.error) setError(recordResult.error?.message || weightResult.error?.message || vaccinationResult.error?.message || noteResult.error?.message || 'No fue posible cargar los detalles.')
-    setRecords((recordResult.data || []) as ClinicalRecord[])
-    setLatestWeight(weightResult.data as WeightRecord | null)
-    setVaccinations((vaccinationResult.data || []) as Vaccination[])
-    setNote(noteResult.data as PetNote | null)
-    setLoading(false)
-  }, [pet.id])
-
-  useEffect(() => { void loadRecords() }, [loadRecords])
+    try {
+      const prefix = `pets/${pet.id}`
+      const page = await localData<ClinicalRecord[]>(`${prefix}/clinical-records?limit=25&offset=${append ? records.length : 0}`)
+      if (!append) {
+        const [weights, vaccines, notes] = await Promise.all([
+          localData<WeightRecord[]>(`${prefix}/weight-records?limit=1`),
+          localData<Vaccination[]>(`${prefix}/vaccinations?limit=200`),
+          localData<PetNote[]>(`${prefix}/pet-notes?limit=1`),
+        ])
+        setLatestWeight(weights[0] || null)
+        setVaccinations(vaccines)
+        setNote(notes[0] || null)
+      }
+      setRecords((current) => append ? [...current, ...page] : page)
+      setHasMore(page.length === 25)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No fue posible cargar la ficha.')
+    } finally {
+      setLoading(false)
+    }
+  }, [pet.id, records.length])
+  useEffect(() => { void loadRecords() }, [pet.id])
 
   async function changeStatus() {
     const nextStatus: DetailedPet['status'] = pet.status === 'active' ? 'deceased' : 'active'
@@ -696,58 +668,46 @@ export function PetDetails({ pet, role, userId, professionalName, onPetChanged, 
     if (!window.confirm(question)) return
     setChangingStatus(true)
     setError('')
-    const { error: updateError } = await supabase.from('pets').update({ status: nextStatus }).eq('id', pet.id)
-    if (updateError) setError(updateError.message)
-    else onPetChanged({ ...pet, status: nextStatus }, true)
+    try {
+      const updated = await localWrite<DetailedPet>(`pets/${pet.id}`, 'PATCH', { expected_version: pet.row_version, changes: { status: nextStatus } })
+      onPetChanged(updated, true)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No fue posible cambiar el estado.')
+    }
     setChangingStatus(false)
   }
 
   async function deleteClinicalFile(file: ClinicalFile) {
-    if (!window.confirm(`¿Eliminar ${file.original_name} de este expediente?`)) return
+    if (!window.confirm(`¿Eliminar ${file.original_name} de este expediente? El archivo físico se conserva para sincronización.`)) return false
     setError('')
-    const { error: deleteError } = await supabase.from('clinical_files').delete().eq('id', file.id)
-    if (deleteError) {
-      setError(deleteError.message)
-      return
+    try {
+      await localWrite(`clinical-files/${file.id}`, 'DELETE', { expected_version: file.row_version })
+      return true
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No fue posible eliminar el adjunto.')
+      return false
     }
-    const { count, error: countError } = await supabase.from('clinical_files').select('id', { count: 'exact', head: true }).eq('object_path', file.object_path)
-    if (!countError && !count) await deleteLocalFile(file.object_path)
-    await loadRecords()
-  }
-
-  async function deleteLocalFileIfUnused(path: string) {
-    const [petUses, clinicalUses] = await Promise.all([
-      supabase.from('pets').select('id', { count: 'exact', head: true }).eq('photo_path', path),
-      supabase.from('clinical_files').select('id', { count: 'exact', head: true }).eq('object_path', path),
-    ])
-    if (!petUses.error && !clinicalUses.error && !(petUses.count || 0) && !(clinicalUses.count || 0)) await deleteLocalFile(path)
   }
 
   async function deleteRecord(record: ClinicalRecord) {
-    const paths = [...new Set((record.clinical_files || []).map((file) => file.object_path))]
-    const { error: deleteError } = await supabase.from('clinical_records').delete().eq('id', record.id).select('id').single()
-    if (deleteError) throw new Error(deleteError.message)
-    await Promise.all(paths.map(deleteLocalFileIfUnused))
+    await localWrite(`clinical-records/${record.id}`, 'DELETE', { expected_version: record.row_version })
     setEditingRecord(null)
     await loadRecords()
+    onRecordsChanged()
   }
 
   async function deletePet() {
-    const { data: files, error: filesError } = await supabase
-      .from('clinical_files')
-      .select('object_path, clinical_records!inner(pet_id)')
-      .eq('clinical_records.pet_id', pet.id)
-    if (filesError) throw new Error(filesError.message)
-    const paths = [...new Set([pet.photo_path, ...(files || []).map((file) => file.object_path)].filter((path): path is string => Boolean(path)))]
-    const { error: deleteError } = await supabase.from('pets').delete().eq('id', pet.id).select('id').single()
-    if (deleteError) throw new Error(deleteError.message)
-    await Promise.all(paths.map(deleteLocalFileIfUnused))
+    await localWrite(`pets/${pet.id}`, 'DELETE', { expected_version: pet.row_version })
     onPetDeleted()
   }
 
+  async function recordsSaved() {
+    await loadRecords()
+    onRecordsChanged()
+  }
   return (
     <div className="pet-details">
-      {editingPet ? <PetEditForm pet={pet} latestWeight={latestWeight} vaccinations={vaccinations} note={note} onSaved={(updatedPet) => { onPetChanged(updatedPet); void loadRecords() }} onCancel={() => setEditingPet(false)} /> : <section className="pet-profile-card">
+      {editingPet ? <PetEditForm pet={pet} latestWeight={latestWeight} vaccinations={vaccinations} note={note} onSaved={(updatedPet, refresh = true) => { onPetChanged(updatedPet); if (refresh) void loadRecords() }} onCancel={() => setEditingPet(false)} /> : <section className="pet-profile-card">
         <div className="pet-photo-control">
           {photoUrl && !photoFailed ? <button type="button" className="pet-photo-large" onClick={() => setPhotoExpanded(true)} aria-label={`Ampliar fotografía de ${pet.name}`} title="Ampliar fotografía"><img src={photoUrl} alt={`Fotografía de ${pet.name}`} onError={() => setPhotoFailed(true)} /></button> : <div className="pet-photo-large"><PawPrint size={42} /></div>}
           {canEdit && <label className="photo-change-button"><Camera size={15} /> {changingPhoto ? 'Cambiando…' : 'Cambiar foto'}<input type="file" accept=".bmp,.gif,.jfif,.jpeg,.jpg,.png,.webp,image/*" disabled={changingPhoto} onChange={(event) => void changePhoto(event)} /></label>}
@@ -774,14 +734,15 @@ export function PetDetails({ pet, role, userId, professionalName, onPetChanged, 
       <section className="clinical-section">
         <div className="clinical-section-header"><div><p className="eyebrow">Historial</p><h3>Expedientes médicos</h3></div>{canEdit && !showForm && !editingRecord && <button className="button primary" onClick={() => setShowForm(true)}><Plus size={17} /> Nuevo expediente</button>}</div>
         {!canEdit && <p className="form-note"><Stethoscope size={17} /> Recepción puede consultar el historial; solo Dueño y Veterinaria pueden modificarlo.</p>}
-        {showForm && <ClinicalRecordForm pet={pet} userId={userId} professionalName={professionalName} onSaved={loadRecords} onCancel={() => setShowForm(false)} />}
-        {editingRecord && <ClinicalRecordForm pet={pet} userId={userId} professionalName={professionalName} record={editingRecord} onSaved={loadRecords} onCancel={() => setEditingRecord(null)} />}
+        {showForm && <ClinicalRecordForm pet={pet} professionalName={professionalName} onSaved={recordsSaved} onCancel={() => setShowForm(false)} />}
+        {editingRecord && <ClinicalRecordForm pet={pet} professionalName={professionalName} record={editingRecord} onSaved={recordsSaved} onCancel={() => setEditingRecord(null)} />}
         {error && <p className="form-error" role="alert">{error}</p>}
-        {loading ? <div className="inline-loader"><span className="loader" /> Cargando historial…</div> : records.length === 0 ? <div className="clinical-empty"><Stethoscope size={25} /><strong>Sin expedientes médicos</strong><span>Registra la primera consulta de esta mascota.</span></div> : <div className="clinical-records">{records.map((record) => <ClinicalRecordCard key={record.id} record={record} canEdit={canEdit} onEdit={() => { setShowForm(false); setEditingRecord(record) }} onDelete={() => setDeleteTarget({ kind: 'record', record })} onDeleteFile={(file) => void deleteClinicalFile(file)} />)}</div>}
+        {loading && records.length === 0 ? <div className="inline-loader"><span className="loader" /> Cargando historial…</div> : records.length === 0 ? <div className="clinical-empty"><Stethoscope size={25} /><strong>Sin expedientes médicos</strong><span>Registra la primera consulta de esta mascota.</span></div> : <div className="clinical-records">{records.map((record) => <ClinicalRecordCard key={`${record.id}:${record.row_version}`} record={record} canEdit={canEdit} onEdit={() => { setShowForm(false); setEditingRecord(record) }} onDelete={() => setDeleteTarget({ kind: 'record', record })} onDeleteFile={deleteClinicalFile} />)}</div>}
       </section>
+      {hasMore && <button className="button secondary" disabled={loading} onClick={() => void loadRecords(true)}>{loading ? 'Cargando…' : 'Cargar más expedientes'}</button>}
       {deleteTarget && <PasswordDeleteDialog
         title={deleteTarget.kind === 'pet' ? `Eliminar a ${pet.name}` : 'Eliminar expediente médico'}
-        description={deleteTarget.kind === 'pet' ? `Se eliminarán ${pet.name}, todos sus expedientes y sus archivos asociados.` : `Se eliminará el expediente del ${formatDate(deleteTarget.record.occurred_at, true)} y sus archivos asociados.`}
+        description={deleteTarget.kind === 'pet' ? `Se eliminarán ${pet.name}, sus expedientes y los enlaces a sus archivos. Los archivos físicos se conservarán hasta confirmar la sincronización.` : `Se eliminará el expediente del ${formatDate(deleteTarget.record.occurred_at, true)} y los enlaces a sus archivos. Los archivos físicos se conservarán hasta confirmar la sincronización.`}
         confirmLabel={deleteTarget.kind === 'pet' ? 'Eliminar mascota' : 'Eliminar expediente'}
         onClose={() => setDeleteTarget(null)}
         onConfirm={() => deleteTarget.kind === 'pet' ? deletePet() : deleteRecord(deleteTarget.record)}
