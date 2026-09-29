@@ -1,0 +1,362 @@
+INSTALACIÓN DE ACCIÓN ANIMAL OFFLINE EN UNA PC WINDOWS NUEVA
+Proyecto de producción: hvfubwyzarikudisbwfy
+Repositorio: https://github.com/DesarrollosDaniel/Accion_Animal_Offline.git
+Ruta elegida en esta guía: C:\AccionAnimal\Accion_Animal_Offline
+Puerto de la interfaz: 4174
+
+Esta guía instala una PC nueva como sustituta de la PC que actualmente ejecuta
+Acción Animal Offline. Las operaciones clínicas se almacenan primero en
+PostgreSQL local; watch envía únicamente las operaciones explícitas de la cola
+local a Supabase y recibe los cambios remotos. La ausencia de una fila local
+NO produce una eliminación en Supabase. Las eliminaciones hechas expresamente
+en la interfaz sí se envían. No enciendas dos instalaciones activas a la vez.
+
+1. PREPARAR LA VERSIÓN CORRECTA EN GITHUB Y CERRAR LA PC ANTERIOR
+
+En la PC actual, desde la carpeta Accion_Animal_Offline, comprueba:
+
+    git status --short
+    git log -1 --oneline
+
+Al redactar esta guía hay cambios locales SIN CONFIRMAR, incluidos los scripts
+de producción y las migraciones 007/008. Un clon actual de GitHub NO es todavía
+esta versión. Antes de seguir, revisar, confirmar y publicar esos cambios en
+main; comprobar después que el clon nuevo contiene scripts/sync-production.mjs,
+scripts/production-environment.mjs y db/local/migrations/008_multiple_owners.sql.
+No copies node_modules, dist-production ni .env.production.local mediante Git.
+
+Deja terminar el watch antiguo. Si corre en PowerShell, presiona Ctrl+C y
+espera a recuperar el prompt; si corre en el Programador de tareas, usa
+«Finalizar» y «Deshabilitar». En una PowerShell de la PC antigua ejecuta:
+
+    $env:AA_PROD_DB_HOST = 'aws-0-us-east-1.pooler.supabase.com'
+    $env:AA_SYNC_CA_FILE = (Resolve-Path .\prod-ca-2021.crt).Path
+    $env:AA_DB_PASSWORD = [System.Net.NetworkCredential]::new('', (Read-Host 'Contraseña local de aa_local_app' -AsSecureString)).Password
+    $env:AA_PROD_WORKER_PASSWORD = [System.Net.NetworkCredential]::new('', (Read-Host 'Contraseña de aa_sync_worker PRODUCCIÓN' -AsSecureString)).Password
+    node --env-file=.env.production.local scripts/sync-production.mjs --check
+
+Si el host real del Session pooler cambió, usa el que muestra Connect del
+proyecto de producción.
+El listado de pendientes y conflictos debe estar vacío. Si hay operaciones
+pending, blocked o conflict, resuélvelas ANTES de cambiar de PC; la importación
+desde Supabase no recupera operaciones que solo existan en el PostgreSQL antiguo.
+Detén también el servidor antiguo. Si hay archivos físicos en su carpeta
+uploaded/production, cópialos a la misma ruta relativa en la PC nueva mediante
+un medio privado. La importación de PostgreSQL copia metadatos, NO archivos.
+Si la PC antigua nunca recibió esos archivos físicos, esta guía no los crea.
+
+2. INSTALAR PROGRAMAS Y CREAR LA CARPETA
+
+Instala Git para Windows, Node.js 24 (en esta PC se usó 24.19.0) y PostgreSQL
+18 con psql y servicio de Windows. Conserva la contraseña local del usuario
+postgres creada en el instalador. Configura PostgreSQL para arrancar con
+Windows y para escuchar solo en la propia PC, puerto 5432. Comprueba en
+PowerShell:
+
+    git --version
+    node --version
+    npm.cmd --version
+    & 'C:\Program Files\PostgreSQL\18\bin\psql.exe' --version
+
+Si los programas están en otras rutas, adapta las rutas absolutas indicadas
+abajo. No instales el proyecto dentro de OneDrive ni de Program Files. En
+PowerShell:
+
+    New-Item -ItemType Directory -Path C:\AccionAnimal -Force
+    git clone https://github.com/DesarrollosDaniel/Accion_Animal_Offline.git C:\AccionAnimal\Accion_Animal_Offline
+    Set-Location C:\AccionAnimal\Accion_Animal_Offline
+    git log -1 --oneline
+    Test-Path scripts\sync-production.mjs
+    Test-Path db\local\migrations\008_multiple_owners.sql
+    npm.cmd ci
+
+Ambos Test-Path deben devolver True. El commit debe ser el publicado en el
+paso 1. No uses npm run local ni scripts/sync-test-data.mjs: corresponden al
+proyecto de PRUEBAS, no a producción.
+
+3. CREAR POSTGRESQL LOCAL DE PRODUCCIÓN
+
+En la raíz del repositorio, crea la base vacía. Cada comando psql solicitará
+la contraseña del postgres LOCAL, no la de Supabase:
+
+    $psql = 'C:\Program Files\PostgreSQL\18\bin\psql.exe'
+    & $psql -X -h 127.0.0.1 -p 5432 -U postgres -d postgres -W -v ON_ERROR_STOP=1 -c 'CREATE DATABASE accion_animal_produ'
+
+Aplica las ocho migraciones EN ORDEN y únicamente sobre accion_animal_produ:
+
+    & $psql -X -h 127.0.0.1 -p 5432 -U postgres -d accion_animal_produ -W -v ON_ERROR_STOP=1 -f 'db/local/migrations/001_initial_schema.sql' -f 'db/local/migrations/002_sync_foundation.sql' -f 'db/local/migrations/003_offline_auth.sql' -f 'db/local/migrations/004_pet_inbound.sql' -f 'db/local/migrations/005_clinical_records_inbound.sql' -f 'db/local/migrations/006_clinical_resources_inbound.sql' -f 'db/local/migrations/007_incremental_inbound.sql' -f 'db/local/migrations/008_multiple_owners.sql'
+
+Detente si psql muestra ERROR o devuelve un código distinto de cero. Las
+migraciones no deben repetirse sobre una base ya preparada. La 008 permite
+los dos perfiles owner que existen en este proyecto de producción.
+
+La migración 002 creó aa_local_app SIN LOGIN. Asígnale una contraseña nueva:
+
+    & $psql -X -h 127.0.0.1 -p 5432 -U postgres -d accion_animal_produ -W
+
+DENTRO de psql, escribe las siguientes líneas por separado. Después de
+\password introduce dos veces la nueva clave de aa_local_app cuando la pida:
+
+    \password aa_local_app
+    ALTER ROLE aa_local_app LOGIN;
+    \q
+
+Comprueba que aparezca ALTER ROLE. No escribas \password en PowerShell.
+
+4. CONFIGURAR PRODUCCIÓN SIN MEZCLARLA CON PRUEBAS
+
+El archivo .env.production.local NO viene de Git. Créalo en la raíz del clon
+con Bloc de notas. Estas son sus líneas; sustituye únicamente la clave
+publicable por la del proyecto hvfubwyzarikudisbwfy, obtenida en Supabase,
+Project Settings > API Keys. No pongas la service_role key aquí:
+
+    AA_MODE=production
+    AA_DB_NAME=accion_animal_produ
+    AA_STORAGE_ROOT=uploaded/production
+    AA_HOST=0.0.0.0
+    AA_PORT=4174
+    AA_MAX_UPLOAD_BYTES=52428800
+    VITE_SUPABASE_URL=https://hvfubwyzarikudisbwfy.supabase.co
+    VITE_SUPABASE_PUBLISHABLE_KEY=PEGAR_CLAVE_PUBLICABLE_REAL
+    AA_PROD_DB_HOST=aws-0-us-east-1.pooler.supabase.com
+    AA_SYNC_CA_FILE=prod-ca-2021.crt
+
+Confirma el host del Session pooler, puerto 5432, en Connect del proyecto
+hvfubwyzarikudisbwfy; si difiere, usa el que muestra ese proyecto. El usuario
+de base de producción es postgres.hvfubwyzarikudisbwfy, NO solo postgres y NO
+postgres.wuenfwsjifwuupfjgubm. La URL VITE corresponde al proyecto de
+producción, no al de pruebas. No pongas contraseñas en este archivo.
+
+El certificado prod-ca-2021.crt debe existir en la raíz del clon. Está
+versionado en este repositorio. Verifica:
+
+    Test-Path .\prod-ca-2021.crt
+    New-Item -ItemType Directory -Path .\uploaded\production -Force
+
+Si copiaste archivos físicos desde la PC anterior, intégralos bajo
+uploaded/production conservando sus rutas y nombres. No copies secretos de
+pruebas ni cambies AA_STORAGE_ROOT por otra ruta: el arranque de producción
+exige exactamente uploaded/production.
+
+5. COMPILAR Y COMPROBAR LA CONEXIÓN LOCAL
+
+En la misma PowerShell, carga la clave LOCAL sin mostrarla ni guardarla en Git:
+
+    $env:AA_DB_PASSWORD = [System.Net.NetworkCredential]::new('', (Read-Host 'Contraseña local de aa_local_app' -AsSecureString)).Password
+    npm.cmd run build:production
+
+La compilación debe crear dist-production/index.html y
+dist-production/project-ref. Si falla, corrige la configuración antes de
+seguir. Para probar solo la base local:
+
+    & $psql -X -h 127.0.0.1 -p 5432 -U aa_local_app -d accion_animal_produ -W -v ON_ERROR_STOP=1 -c 'SELECT count(*) FROM aa_local.sync_state'
+
+Debe devolver 3. No uses una base llamada accion_animal_dev para producción.
+
+6. IMPORTAR DATOS EXISTENTES DESDE SUPABASE, SOLO UNA VEZ
+
+Obtén la contraseña Database actual del proyecto de producción. No la envíes
+por chat. En la misma PowerShell, con AA_DB_PASSWORD ya cargada:
+
+    $env:AA_PROD_DB_PASSWORD = [System.Net.NetworkCredential]::new('', (Read-Host 'Contraseña Database de Supabase PRODUCCIÓN' -AsSecureString)).Password
+    node --env-file=.env.production.local scripts/import-test-data.mjs --production --check
+
+--check termina con ROLLBACK y no conserva cambios locales. Si pasa, ejecuta:
+
+    node --env-file=.env.production.local scripts/import-test-data.mjs --production --apply
+
+Este importador lee Supabase dentro de una transacción READ ONLY y escribe
+solo en accion_animal_produ. Requiere tablas locales vacías y copia perfiles,
+mascotas, expedientes y metadatos. No puede volver a ejecutarse sobre la base
+ya poblada. Comprueba los recuentos mostrados. Los adjuntos físicos requieren
+la copia del paso 1.
+
+La cuenta remota aa_sync_worker y las migraciones remotas ya se crearon para
+este proyecto. NO ejecutes prepare-production-sync.mjs --apply en una PC nueva:
+ese comando solo sirve para la preparación inicial y se negará a duplicarla.
+Tampoco restablezcas la contraseña remota del worker sin coordinar el cambio en
+todas las PCs que lo usen.
+
+Si se perdió la contraseña de aa_sync_worker, con el watch antiguo detenido,
+conéctate por psql al Session pooler usando la contraseña Database de
+producción. No uses «Reset database»:
+
+    $env:PGSSLMODE = 'verify-full'
+    $env:PGSSLROOTCERT = (Resolve-Path .\prod-ca-2021.crt).Path
+    & $psql -X -h aws-0-us-east-1.pooler.supabase.com -p 5432 -U postgres.hvfubwyzarikudisbwfy -d postgres -W
+
+Dentro de psql ejecuta \password aa_sync_worker, asigna la nueva contraseña
+y sal con \q. Usa el host real de Connect si difiere del ejemplo. Actualiza
+entonces el secreto DPAPI del paso 8; el cambio de clave invalida cualquier
+watch antiguo que aún use la clave anterior.
+
+7. VERIFICAR EL WORKER Y PROBAR LOS PROCESOS MANUALMENTE
+
+La contraseña de aa_sync_worker ya se asignó en Supabase. Cárgala en la misma
+PowerShell (es distinta de las dos contraseñas anteriores):
+
+    $env:AA_PROD_WORKER_PASSWORD = [System.Net.NetworkCredential]::new('', (Read-Host 'Contraseña de aa_sync_worker PRODUCCIÓN' -AsSecureString)).Password
+    node --env-file=.env.production.local scripts/sync-production.mjs --check
+
+--check no envía datos. Confirma que conecta y revisa la cola. Si quieres ver
+un ciclo completo de prueba antes de dejar watch activo:
+
+    node --env-file=.env.production.local scripts/sync-production.mjs --once
+
+--once puede revisar el primer lote de la carga inicial; watch lo volverá a
+revisar porque los cursores por tabla viven en memoria. Es seguro, pero no es
+necesario para comenzar la carga. Después de la importación, el primer --watch
+hará una carga inicial por lotes
+de hasta 500 registros por tabla, con pausas de dos segundos. Al aparecer
+«Carga inicial remota terminada», continuará desde el cursor de auditoría
+guardado y consultará novedades cada 30 segundos. El límite de envío de
+operaciones locales es 50 por ciclo. El cursor sube con los eventos de
+Supabase; no representa errores ni cantidad de filas pendientes.
+
+Prueba el servidor en otra PowerShell con su propia AA_DB_PASSWORD cargada:
+
+    Set-Location C:\AccionAnimal\Accion_Animal_Offline
+    $env:AA_DB_PASSWORD = [System.Net.NetworkCredential]::new('', (Read-Host 'Contraseña local de aa_local_app' -AsSecureString)).Password
+    npm.cmd run start:production
+
+Abre http://127.0.0.1:4174/api/health: debe indicar ok=true,
+database=available y storage=available. Abre http://127.0.0.1:4174 e inicia
+sesión. Tras un ingreso con internet se guarda la verificación local de la
+cuenta para el acceso sin conexión; esa verificación caduca a los siete días
+si no se renueva online. Detén las pruebas manuales con Ctrl+C ANTES de crear
+las tareas automáticas. No dejes un watch manual junto con el programado.
+
+8. GUARDAR LAS DOS CLAVES DE EJECUCIÓN AUTOMÁTICA PARA ESA CUENTA WINDOWS
+
+Las tareas de Windows no heredan las variables $env: de tu PowerShell. Usa la
+MISMA cuenta Windows con la que ejecutarás las tareas. PowerShell cifra estos
+dos archivos con DPAPI para esa cuenta y esa PC; no copies los archivos a otra
+cuenta o máquina. En una PowerShell normal de esa cuenta:
+
+    Set-Location C:\AccionAnimal\Accion_Animal_Offline
+    $secretDir = Join-Path $env:LOCALAPPDATA 'AccionAnimalOffline'
+    New-Item -ItemType Directory -Path $secretDir -Force
+    Read-Host 'Contraseña local de aa_local_app' -AsSecureString | ConvertFrom-SecureString | Set-Content -LiteralPath (Join-Path $secretDir 'aa_db_password.dpapi')
+    Read-Host 'Contraseña de aa_sync_worker PRODUCCIÓN' -AsSecureString | ConvertFrom-SecureString | Set-Content -LiteralPath (Join-Path $secretDir 'aa_worker_password.dpapi')
+
+No guardes aquí la contraseña postgres de Supabase; solo se necesita para la
+importación/diagnóstico administrativo, no para el funcionamiento diario.
+Protege la cuenta Windows con contraseña y limita el acceso a esta carpeta.
+
+En la misma PC crea instalacion\iniciar-produccion.ps1 con Bloc de notas y
+PEGA EXACTAMENTE el siguiente contenido:
+
+    param([ValidateSet('server','watch')][string]$Mode)
+    $ErrorActionPreference = 'Stop'
+    $projectRoot = Split-Path -Parent $PSScriptRoot
+    $secretDir = Join-Path $env:LOCALAPPDATA 'AccionAnimalOffline'
+    $node = Join-Path $env:ProgramFiles 'nodejs\node.exe'
+    Set-Location -LiteralPath $projectRoot
+    $env:AA_DB_PASSWORD = [System.Net.NetworkCredential]::new('', (Get-Content -LiteralPath (Join-Path $secretDir 'aa_db_password.dpapi') -TotalCount 1 | ConvertTo-SecureString)).Password
+    if ($Mode -eq 'watch') {
+      $env:AA_PROD_WORKER_PASSWORD = [System.Net.NetworkCredential]::new('', (Get-Content -LiteralPath (Join-Path $secretDir 'aa_worker_password.dpapi') -TotalCount 1 | ConvertTo-SecureString)).Password
+    }
+    if (-not (Test-Path -LiteralPath $node)) { throw 'No se encontró node.exe' }
+    $log = Join-Path $secretDir ("$Mode.log")
+    if ($Mode -eq 'server') {
+      & $node --env-file=.env.production.local server/local-server.mjs *>> $log
+    } else {
+      & $node --env-file=.env.production.local scripts/sync-production.mjs --watch *>> $log
+    }
+    throw "El proceso $Mode terminó con código $LASTEXITCODE. Revisa $log"
+
+Comprueba primero el launcher en PowerShell normal, por separado. Cada uno
+queda ejecutándose; usa Ctrl+C para detenerlo. El primero debe servir health;
+el segundo debe conectar y dejar «Perfiles de PRODUCCIÓN recibidos» en watch.log:
+
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\instalacion\iniciar-produccion.ps1 server
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\instalacion\iniciar-produccion.ps1 watch
+
+Los registros quedan en %LOCALAPPDATA%\AccionAnimalOffline\server.log y
+watch.log. Un error de conexión aparecerá allí. Si cambias cualquiera de las
+dos contraseñas, vuelve a generar el archivo .dpapi correspondiente con la
+contraseña nueva y reinicia la tarea. No copies estos archivos al repositorio.
+Para leer el final de cada registro desde PowerShell:
+
+    Get-Content (Join-Path $env:LOCALAPPDATA 'AccionAnimalOffline\server.log') -Tail 30
+    Get-Content (Join-Path $env:LOCALAPPDATA 'AccionAnimalOffline\watch.log') -Tail 30
+
+9. PROGRAMAR EL SERVIDOR Y WATCH AL ENCENDER WINDOWS
+
+Abre Programador de tareas (Win+R, taskschd.msc) y usa «Crear tarea» DOS
+veces, nunca «Crear tarea básica». Crea ambas bajo la MISMA cuenta Windows
+del paso 8. Esa cuenta necesita contraseña de Windows para poder seleccionar
+«Ejecutar tanto si el usuario inició sesión como si no». Deja desmarcada la
+opción «No almacenar contraseña» para que DPAPI pueda abrir los secretos.
+
+Tarea 1: Accion Animal Offline - Servidor
+  General: ejecutar aunque el usuario no haya iniciado sesión; sin privilegios
+           elevados (el uso diario no requiere administrador).
+  Desencadenador: al iniciar el sistema; retrasar 1 minuto.
+  Acción > Programa: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+  Acción > Argumentos:
+    -NoProfile -ExecutionPolicy Bypass -File "C:\AccionAnimal\Accion_Animal_Offline\instalacion\iniciar-produccion.ps1" server
+  Acción > Iniciar en (SIN comillas):
+    C:\AccionAnimal\Accion_Animal_Offline
+
+Tarea 2: Accion Animal Offline - Watch
+  General: la misma cuenta y configuración de la tarea 1.
+  Desencadenador: al iniciar el sistema; retrasar 2 minutos.
+  Acción > Programa: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+  Acción > Argumentos:
+    -NoProfile -ExecutionPolicy Bypass -File "C:\AccionAnimal\Accion_Animal_Offline\instalacion\iniciar-produccion.ps1" watch
+  Acción > Iniciar en (SIN comillas):
+    C:\AccionAnimal\Accion_Animal_Offline
+
+En AMBAS tareas, pestaña Condiciones: desmarca «Iniciar solamente si está
+conectado a corriente alterna» y «Detener si cambia a batería». En
+Configuración: habilita iniciar a petición, reiniciar cada minuto si falla
+(al menos 10 intentos), «Si ya se está ejecutando: no iniciar una instancia
+nueva», y desmarca «Detener la tarea si dura más de...». Windows solicitará la
+contraseña de esa cuenta al guardar. Verifica que el servicio de PostgreSQL
+también tenga inicio automático en services.msc.
+
+Usa «Ejecutar» en cada tarea para probar. Comprueba health y los dos logs.
+Reinicia Windows y vuelve a comprobar: tarea Servidor en ejecución, tarea
+Watch en ejecución, health con database=available y la interfaz accesible.
+Un watch estable puede permanecer en silencio si no hay cambios; eso es
+normal. Si la tarea termina, consulta su «Último resultado» y watch.log.
+
+10. ACCESO DESDE OTRAS COMPUTADORAS Y VERIFICACIÓN FINAL
+
+En la PC servidor comprueba que la red del consultorio sea Privada:
+
+    Get-NetConnectionProfile
+
+En PowerShell COMO ADMINISTRADOR crea una sola regla para el puerto 4174,
+únicamente en redes privadas:
+
+    New-NetFirewallRule -DisplayName 'Accion Animal Offline 4174' -Direction Inbound -Protocol TCP -LocalPort 4174 -Action Allow -Profile Private
+
+Con ipconfig obtén la IPv4 local. Desde otra PC en la misma red abre
+http://IP-DE-LA-PC-SERVIDOR:4174. No abras el puerto al internet público ni
+configures port forwarding/DMZ en el router. Reserva la IP del servidor en el
+router si otras PC lo usarán diariamente. Evita que Windows suspenda esta PC
+y confirma que PostgreSQL, servidor Node y watch arranquen tras reiniciar.
+
+Verificación funcional mínima: entra con un usuario activo, busca una mascota
+conocida, abre su ficha y comprueba que los datos aparecen. Comprueba que los
+archivos físicos que sí copiaste se abran. Un cambio local autorizado debe
+quedar confirmed en watch; un cambio remoto nuevo debe llegar a la PC y mover
+el cursor. Si hay conflict o blocked, revísalo antes de dar la instalación por
+lista. Para diagnóstico sin enviar operaciones, detén primero el watch
+programado y ejecuta en PowerShell con sus claves cargadas:
+
+    node --env-file=.env.production.local scripts/sync-production.mjs --check
+
+La tarea Watch se reanuda desde su cursor guardado; no necesita importar todo
+otra vez. Para ver también las recepciones pendientes se puede usar
+scripts/check-production-sync.mjs, pero requiere AA_PROD_DB_PASSWORD en esa
+PowerShell y hace solo lecturas. No uses el importador otra vez sobre una base
+que ya recibió datos o cambios locales.
+
+MANTENIMIENTO: al publicar una versión nueva, detén las dos tareas, confirma
+que no hay operaciones pendientes, actualiza el clon con git pull, ejecuta
+npm.cmd ci y npm.cmd run build:production, aplica solo las migraciones nuevas
+que esa versión indique, y vuelve a iniciar las dos tareas. No ejecutes dos
+watch a la vez ni cambies .env.production.local por el proyecto de PRUEBAS.

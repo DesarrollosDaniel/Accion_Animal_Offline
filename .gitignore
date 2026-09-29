@@ -11,6 +11,7 @@
 # Dependencias y compilación
 node_modules/
 dist/
+dist-production/
 *.tsbuildinfo
 .tmp-*/
 supabase/.temp/

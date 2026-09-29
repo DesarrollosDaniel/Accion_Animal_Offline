@@ -395,11 +395,11 @@ Plan de esta etapa:
 3. Después de esas verificaciones, ampliar a altas, eliminaciones y expedientes.
 
 Implementado el punto 1: --watch usa la misma conexión y cuenta de sincronización.
-Cada ciclo recibe perfiles, envía pendientes y revisa hasta 50 mascotas locales
+Cada ciclo recibe perfiles, envía pendientes y revisa hasta 500 mascotas locales
 por UUID. Consulta esas UUID en Supabase usando su índice primario; no descarga
 toda la tabla ni agrega solicitudes al navegador. --once revisa un solo lote.
 La pausa entre ciclos es de 30 segundos más el tiempo de las consultas.
-Con más de 50 mascotas se requieren varias vueltas para revisar todas; el
+Con más de 500 mascotas se requieren varias vueltas para revisar todas; el
 cursor vive en memoria y reiniciar vuelve al primer lote.
 
 Se actualizan solo filas con cambios de contenido, ignorando diferencias de
@@ -439,7 +439,7 @@ Verificación: las 15 pruebas del sincronizador pasan, incluyendo resolución
 con base previa y rechazo de cambios posteriores a la revisión.
 ### 4.11 Recepción automática de mascotas nuevas
 
-Los modos --watch y --once descubren también hasta 50 UUID de mascotas en
+Los modos --watch y --once descubren también hasta 500 UUID de mascotas en
 Supabase por ciclo, usando el índice primario y un cursor en memoria. Solo se
 descargan los datos completos de las que faltan localmente. Se conservan UUID,
 campos, auditoría original y referencia remota. No se añade una operación de
@@ -466,7 +466,7 @@ diagnóstico del usuario mostró 42 confirmadas, sin conflictos pendientes.
 
 Confirmado por el usuario: una mascota nueva de Supabase llegó a la PC y su
 edición local produjo confirmed: 1. Implementada ahora la recepción de altas y
-ediciones de clinical_records con lotes de 50 UUID por ciclo de --once/--watch.
+ediciones de clinical_records con lotes de 500 UUID por ciclo de --once/--watch.
 Reutiliza la recepción de mascotas, conserva referencia remota y continúa las
 versiones después del historial previo. No crea operaciones de salida al importar.
 Protege pendientes, bloqueadas y conflictos, incluidas eliminaciones locales.
@@ -495,14 +495,13 @@ con checked, received y protected. Para verificar: crear o editar una consulta
 ficticia en Supabase para una mascota ya local, comprobar su recepción, editarla
 localmente y comprobar confirmed: 1. Verificar también una edición simultánea:
 el conflicto debe proteger la versión local. Reiniciar --watch solo después de
-estas comprobaciones. Cada ciclo revisa 50 expedientes; los cursores viven en
-memoria y una vuelta completa requiere ceil(N/50) ciclos.
+estas comprobaciones. La carga inicial revisa 500 expedientes por ciclo. Tras
+completarla, la migración 007 conserva el cursor y recibe cambios recientes
+desde `audit_events`, incluso después de reiniciar el sincronizador.
 
-Estado: 47 pruebas de código y build pasan. Migración 005, prueba SQL y ensayo
-conectado pendientes; no afirmar recepción real verificada todavía. Vacunas,
-medicamentos, alergias, notas, pesos, metadatos de archivos y eliminaciones
-remotas siguen pendientes. Tampoco está terminado el arranque automático,
-HTTPS ni respaldos de la PC definitiva.
+Estado actualizado el 28 de septiembre de 2026: migración 005 presente y prueba
+SQL aprobada. La recepción y el conflicto de expedientes se verificaron con
+datos ficticios de PRUEBAS; consultar 4.13 para el resultado observado.
 
 ### Contraseñas: nombres recomendados en el gestor
 
@@ -531,7 +530,7 @@ explícita antes de sobrescribir la versión de Supabase.
 
 Implementada recepción de altas y ediciones de vaccinations, medications,
 allergies, pet_notes, weight_records y clinical_files. Reutiliza el receptor
-existente y su referencia remota. Cada tabla recorre hasta 50 UUID por ciclo;
+existente y su referencia remota. Cada tabla recorre hasta 500 UUID por ciclo;
 los cursores son independientes y viven en memoria. Primero se reciben mascotas,
 luego expedientes y luego recursos. Una mascota o consulta aún no recibida
 aplaza su recurso para la siguiente vuelta. Los medicamentos vinculados deben
@@ -573,17 +572,13 @@ enviar pendientes; sin 006 cancela y no ejecuta el ciclo.
 node --env-file-if-exists=.env.local --env-file-if-exists=.env.server scripts/sync-test-data.mjs --once
 ```
 
-Prueba conectada siguiente: modificar una nota ficticia remota; observar
-Recursos clínicos de PRUEBAS (pet_notes) con received: 1 y verla en la PC.
-Editar después esa nota localmente y comprobar confirmed: 1. Con --watch
-detenido, editar la misma nota en ambos lados: esperar conflict: 1 y protected: 1,
-conservar ambas versiones y resolver con --resolve-local tras revisar.
-Repetir recepción con una vacuna y un peso; confirmar también medicamentos,
-alergias y metadatos de adjuntos. No declarar verificados los casos sin observarlos.
-
-Estado: 49 pruebas de sincronizador/API/escrituras pasan. Migración 006, prueba
-SQL y recepción conectada de estas seis tablas pendientes. Eliminaciones remotas,
-arranque automático, HTTPS y respaldos de la PC definitiva siguen pendientes.
+Estado actualizado el 28 de septiembre de 2026: migración 006 presente y prueba
+SQL aprobada. En PRUEBAS ya se observaron `received: 1` para pet_notes,
+vaccinations y weight_records; el usuario confirmó que la nota recibida aparece
+en la ficha. Un ciclo posterior confirmó dos operaciones locales sin conflictos
+ni pendientes. No repetir esas pruebas. Medicamentos, alergias y metadatos de
+adjuntos se revisaron en ciclos sin cambios; no editar campos que la interfaz
+local no ofrece solo para producir otro contador.
 
 ### 4.14 Eliminaciones remotas de recursos clínicos
 
@@ -644,3 +639,125 @@ respaldo verificado. La comprobación definitiva es restaurar periódicamente un
 copia en una base y carpeta de ensayo separadas. Aún no se ha ejecutado en la
 PC definitiva ni se ha programado una tarea diaria; primero falta verificar una
 ejecución real y la restauración de prueba.
+
+Por decisión del usuario, la ejecución y restauración de respaldo quedan fuera
+de los objetivos actuales en esta PC de desarrollo. Retomar antes de usar datos
+reales en el servidor definitivo.
+
+### 4.16 Recepción incremental después de la carga inicial
+
+La migración local `007_incremental_inbound.sql` se aplicó en esta PC. La
+migración remota `20260928184202_incremental_inbound_sync.sql` se aplicó solo al
+proyecto de PRUEBAS. El trabajador guarda el ID inicial de `audit_events`,
+termina una vuelta de carga por las ocho tablas y después consulta hasta 100
+eventos nuevos por ciclo. Las filas protegidas se reintentan cada cinco minutos.
+El envío local sigue ejecutándose al comienzo de cada ciclo.
+
+La cuenta `aa_sync_worker` puede leer los identificadores y tipos de evento,
+sin recibir los datos clínicos del registro de auditoría. El disparador remoto
+ordena los eventos entre transacciones para que el cursor no salte escrituras
+que terminan después. La consulta de permisos en PRUEBAS y las pruebas de código
+pasaron. Falta observar un ciclo conectado con una edición ficticia reciente;
+esto no requiere repetir las pruebas anteriores de notas, vacunas o pesos.
+
+### 4.17 Importación inicial de PRODUCCIÓN a esta PC
+
+La base `accion_animal_produ` se preparó con la estructura local, tres filas de
+`sync_state` y una cola vacía. No se cambió el proyecto Supabase de producción.
+Antes de importar, aplicar `db/local/migrations/008_multiple_owners.sql` en
+`accion_animal_produ` y `accion_animal_dev`: producción contiene dos perfiles
+`owner` y el índice único local anterior impide copiarlos. La recepción de
+perfiles compartida también admite ahora más de un `owner`.
+El modo `--production` de `scripts/import-test-data.mjs` acepta únicamente el
+Session pooler del proyecto `hvfubwyzarikudisbwfy` con el usuario `postgres`.
+El origen usa una transacción `REPEATABLE READ READ ONLY`; el destino es solo
+`accion_animal_produ`. La importación exige que las tablas de negocio y la cola
+estén vacías, verifica columnas y recuentos, y nunca envía operaciones.
+
+En PowerShell, desde la raíz del repositorio, tomar el host del Session pooler
+en **Connect** del proyecto de producción, sin incluir usuario ni contraseña:
+
+```powershell
+$env:AA_PROD_DB_HOST = 'HOST-DEL-SESSION-POOLER'
+$env:AA_PROD_DB_PASSWORD = [System.Net.NetworkCredential]::new('', (Read-Host 'Contraseña PostgreSQL de Supabase PRODUCCIÓN' -AsSecureString)).Password
+$env:AA_DB_PASSWORD = [System.Net.NetworkCredential]::new('', (Read-Host 'Contraseña local de aa_local_app' -AsSecureString)).Password
+node scripts/import-test-data.mjs --production --check
+node scripts/import-test-data.mjs --production --apply
+```
+
+`--check` deshace todos los cambios locales al terminar. `--apply` confirma
+solo la copia local y muestra los recuentos. `scripts/sync-test-data.mjs`
+permanece fijado al proyecto de PRUEBAS; para producción usar únicamente
+`scripts/sync-production.mjs` después de su preparación. Los adjuntos físicos no están incluidos;
+`clinical_files` copia solo metadatos.
+
+### 4.18 Interfaz local de PRODUCCIÓN
+
+`.env.production.local` contiene la URL y la clave publicable copiadas del
+proyecto original de producción, junto con `AA_DB_NAME=accion_animal_produ` y
+`AA_STORAGE_ROOT=uploaded/production`. El archivo está excluido de Git. La
+compilación de pruebas sigue usando `.env.local` y `accion_animal_dev`.
+
+En la misma PowerShell, cargar la contraseña de `aa_local_app` y arrancar:
+
+```powershell
+$env:AA_DB_PASSWORD = [System.Net.NetworkCredential]::new('', (Read-Host 'Contraseña local de aa_local_app' -AsSecureString)).Password
+npm run local:production
+```
+
+La interfaz de producción queda en `http://127.0.0.1:4174`. Este arranque
+comprueba que la compilación y PostgreSQL local correspondan a producción.
+Por ahora es una vista de la copia inicial: todavía no hay sincronizador de
+producción ni archivos físicos de los adjuntos históricos.
+
+### 4.19 Recepción puntual de una mascota de PRODUCCIÓN
+
+Con `AA_PROD_DB_HOST`, `AA_PROD_DB_PASSWORD`, `AA_DB_PASSWORD` y
+`AA_SYNC_CA_FILE` cargadas en la PowerShell, `scripts/receive-production-pet.mjs`
+permite `--check UUID`, `--once UUID` y `--watch UUID`. `--check` muestra los
+campos distintos y las operaciones locales pendientes sin mostrar valores.
+`--once` recibe solo ese UUID en `accion_animal_produ`; `--watch` repite la
+recepción cada 30 segundos y se detiene si hay una edición local pendiente.
+La conexión PostgreSQL de Supabase tiene
+transacciones de solo lectura y el comando no ejecuta `sendPending` ni elimina
+mascotas. No sustituye la sincronización continua de producción.
+
+Para enviar una edición local pendiente del nombre de una sola mascota,
+`scripts/send-production-pet-name.mjs --check UUID_MASCOTA UUID_OPERACIÓN`
+comprueba la versión original, el autor y que el único campo cambiado sea
+`name`. `--apply` repite las comprobaciones bajo bloqueo, actualiza ese nombre
+en Supabase y confirma la operación local. Rechaza eliminaciones, otras
+operaciones pendientes y cambios remotos simultáneos.
+
+### 4.20 Sincronización general de PRODUCCIÓN
+
+`scripts/check-production-sync.mjs` consulta la preparación remota y la cola
+local sin cambiar datos. Si `scripts/prepare-production-sync.mjs --check`
+indica `ready_to_apply: true`, su modo `--apply` aplica en una transacción las
+tres migraciones de transporte, lectura de perfiles y auditoría ordenada. Crea
+`aa_sync_worker` sin LOGIN; no toca filas clínicas existentes. Configurarle una
+contraseña y LOGIN por separado en `psql` conectado al proyecto de PRODUCCIÓN.
+
+```powershell
+$env:PGSSLMODE = 'verify-full'
+$env:PGSSLROOTCERT = (Resolve-Path .\prod-ca-2021.crt).Path
+& 'C:\Program Files\PostgreSQL\18\bin\psql.exe' -X -h $env:AA_PROD_DB_HOST -p 5432 -U postgres.hvfubwyzarikudisbwfy -d postgres -W
+```
+
+Dentro de `psql`: `\password aa_sync_worker`, después
+`ALTER ROLE aa_sync_worker LOGIN;` y `\q`. En PowerShell, cargar la contraseña
+nueva solo en la sesión actual:
+
+```powershell
+$env:AA_PROD_WORKER_PASSWORD = [System.Net.NetworkCredential]::new('', (Read-Host 'Contraseña de aa_sync_worker PRODUCCIÓN' -AsSecureString)).Password
+node --env-file=.env.production.local scripts/sync-production.mjs --check
+```
+
+`scripts/sync-production.mjs --check` verifica la cuenta limitada y muestra
+las operaciones locales que se enviarían. `--once` procesa hasta 50 operaciones
+pendientes y un lote de 500 registros por tabla; `--watch` repite el ciclo. Solo las
+operaciones explícitas de `aa_local.sync_operations` pueden escribir o eliminar
+en Supabase. Una fila ausente en la copia local no genera una eliminación
+remota. La recepción remota modifica únicamente PostgreSQL local y protege
+cambios locales pendientes. Durante el primer recorrido usa pausas de dos
+segundos; después consulta la auditoría cada 30 segundos.

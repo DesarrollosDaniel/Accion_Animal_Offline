@@ -26,6 +26,7 @@ import { vaccineOptions } from './lib/vaccines'
 import type { DetailedPet } from './components/PetDetails'
 import { localData } from './lib/localApi'
 const PetDetails = lazy(() => import('./components/PetDetails').then((module) => ({ default: module.PetDetails })))
+const environmentLabel = import.meta.env.MODE === 'production' ? 'PRODUCCIÓN' : 'PRUEBAS'
 
 type Role = 'owner' | 'veterinarian' | 'reception'
 type View = 'dashboard' | 'pets' | 'inactive-pets' | 'users'
@@ -43,12 +44,13 @@ type LocalPet = Pet & { row_version: string }
 
 async function localPets(): Promise<LocalPet[]> {
   const pets: LocalPet[] = []
-  for (let offset = 0; offset <= 10000; offset += 200) {
+  // ponytail: carga hasta 50 000 mascotas; paginar en el servidor si la apertura se vuelve lenta.
+  for (let offset = 0; offset <= 50000; offset += 200) {
     const page = await localData<LocalPet[]>(`pets?status=all&limit=200&offset=${offset}`)
     pets.push(...page)
     if (page.length < 200) return pets
   }
-  throw new Error('La lista local supera el límite de 10 000 mascotas. Usa la búsqueda.')
+  throw new Error('La lista local supera el límite de 50 000 mascotas. Usa la búsqueda.')
 }
 
 const roleLabels: Record<Role, string> = {
@@ -115,14 +117,14 @@ function Login({ onLogin }: { onLogin: (user: LocalUser) => void }) {
         <div className="login-brand-inner">
           <img src="./logo.jpg" alt="Logotipo de Acción Animal" className="login-logo" />
           <h1>Acción Animal</h1>
-          <p className="environment-badge">ENTORNO DE PRUEBAS</p>
+          <p className="environment-badge">ENTORNO DE {environmentLabel}</p>
           <p className="login-copy">Sistema de gestión</p>
         </div>
       </section>
       <section className="login-panel">
         <form className="login-card" onSubmit={submit}>
           <div className="mobile-logo"><img src="./logo.jpg" alt="Acción Animal" /></div>
-          <p className="environment-badge environment-badge-dark">ENTORNO DE PRUEBAS</p>
+          <p className="environment-badge environment-badge-dark">ENTORNO DE {environmentLabel}</p>
           <p className="eyebrow">Bienvenido</p>
           <h2>Inicia sesión</h2>
           <p className="muted">Usa la cuenta proporcionada por el administrador.</p>
@@ -589,8 +591,8 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
     const term = search.trim().toLocaleLowerCase('es')
     if (term && searchResults) return searchResults
     const petsInView = pets.filter((pet) => view === 'inactive-pets' ? pet.status !== 'active' : pet.status === 'active')
-    if (!term) return petsInView
-    return petsInView.filter((pet) => [pet.name, pet.species, pet.breed, pet.guardian_name, pet.guardian_phone].some((value) => value?.toLocaleLowerCase('es').includes(term)))
+    if (!term) return petsInView.slice(0, 200)
+    return petsInView.filter((pet) => [pet.name, pet.species, pet.breed, pet.guardian_name, pet.guardian_phone].some((value) => value?.toLocaleLowerCase('es').includes(term))).slice(0, 200)
   }, [pets, search, searchResults, view])
 
   const selectedPet = selectedPetId
@@ -617,7 +619,7 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
       <aside className={`sidebar ${mobileNav ? 'open' : ''}`}>
         <div className="sidebar-brand">
           <img src="./logo.jpg" alt="Acción Animal" />
-          <div><strong>Acción Animal</strong><span>ENTORNO DE PRUEBAS</span></div>
+          <div><strong>Acción Animal</strong><span>ENTORNO DE {environmentLabel}</span></div>
         </div>
         <nav aria-label="Navegación principal">
           <p className="nav-caption">MENÚ</p>

@@ -1,33 +1,46 @@
 import { Client } from 'pg'
+import { readFile } from 'node:fs/promises'
 import { assertTestEnvironment } from './test-environment.mjs'
 
-assertTestEnvironment()
-
 const testProject = 'wuenfwsjifwuupfjgubm'
+const productionProject = 'hvfubwyzarikudisbwfy'
+const production = process.argv[2] === '--production'
+if (!production) assertTestEnvironment()
 const tables = [
   'profiles', 'pets', 'clinical_records', 'vaccinations', 'medications',
   'allergies', 'pet_notes', 'weight_records', 'clinical_files',
 ]
+const mode = process.argv[production ? 3 : 2] || '--check'
+const apply = mode === '--apply'
+const targetName = production ? 'accion_animal_produ' : 'accion_animal_dev'
 const sourceUrl = process.env.AA_TEST_DB_URL
-const apply = process.argv[2] === '--apply'
-if (process.argv.length > 3 || (process.argv[2] && !['--check', '--apply'].includes(process.argv[2]))) {
-  throw new Error('Uso: node scripts/import-test-data.mjs [--check|--apply]')
+if (process.argv.length > (production ? 4 : 3) || !['--check', '--apply'].includes(mode)) {
+  throw new Error('Uso: node scripts/import-test-data.mjs [--check|--apply] o --production [--check|--apply]')
 }
-if (!sourceUrl || !process.env.AA_DB_PASSWORD) {
-  throw new Error('Faltan AA_TEST_DB_URL o AA_DB_PASSWORD. No se modificó ninguna base.')
+if (!process.env.AA_DB_PASSWORD || (production ? !process.env.AA_PROD_DB_HOST || !process.env.AA_PROD_DB_PASSWORD : !sourceUrl)) {
+  throw new Error('Faltan credenciales de origen o destino. No se modificó ninguna base.')
 }
-const sourceAddress = new URL(sourceUrl)
-if (!`${sourceAddress.hostname} ${sourceAddress.username}`.includes(testProject)) {
-  throw new Error('El origen debe ser el proyecto Supabase de pruebas. No se modificó ninguna base.')
-}
-if (sourceAddress.hostname === `db.${testProject}.supabase.co`) {
-  throw new Error('La URI es de conexión directa. En Supabase Connect elige Session pooler (puerto 5432).')
+if (!production) {
+  const sourceAddress = new URL(sourceUrl)
+  if (!`${sourceAddress.hostname} ${sourceAddress.username}`.includes(testProject)) {
+    throw new Error('El origen debe ser el proyecto Supabase de pruebas. No se modificó ninguna base.')
+  }
+  if (sourceAddress.hostname === `db.${testProject}.supabase.co`) {
+    throw new Error('La URI es de conexión directa. En Supabase Connect elige Session pooler (puerto 5432).')
+  }
+} else if (!/^aws-[a-z0-9-]+\.pooler\.supabase\.com$/.test(process.env.AA_PROD_DB_HOST)) {
+  throw new Error('AA_PROD_DB_HOST debe ser el host Session pooler de Supabase. No se modificó ninguna base.')
 }
 
-const source = new Client({ connectionString: sourceUrl })
+const source = new Client(production ? {
+  host: process.env.AA_PROD_DB_HOST, port: 5432, database: 'postgres',
+  user: `postgres.${productionProject}`, password: process.env.AA_PROD_DB_PASSWORD,
+  ssl: { rejectUnauthorized: true, ...(process.env.AA_SYNC_CA_FILE ? { ca: await readFile(process.env.AA_SYNC_CA_FILE, 'utf8') } : {}) },
+  connectionTimeoutMillis: 5000,
+} : { connectionString: sourceUrl })
 const target = new Client({
   host: '127.0.0.1', ssl: false, port: Number(process.env.AA_DB_PORT || 5432),
-  database: 'accion_animal_dev', user: 'aa_local_app', password: process.env.AA_DB_PASSWORD,
+  database: targetName, user: 'aa_local_app', password: process.env.AA_DB_PASSWORD,
 })
 
 function quote(name) {
@@ -46,19 +59,41 @@ async function columns(client, schema, table) {
 
 let targetStarted = false
 try {
-  await source.connect()
-  await target.connect()
+  try {
+    await source.connect()
+  } catch (error) {
+    throw new Error(`No se pudo conectar al origen ${production ? 'Supabase PRODUCCIÓN' : 'Supabase PRUEBAS'}: ${error.message}`, { cause: error })
+  }
+  try {
+    await target.connect()
+  } catch (error) {
+    throw new Error(`No se pudo conectar al destino PostgreSQL local: ${error.message}`, { cause: error })
+  }
+  if (production) {
+    await source.query('SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY')
+    const remoteIdentity = await source.query('SELECT current_user AS role, current_database() AS db')
+    if (remoteIdentity.rows[0].role !== 'postgres' || remoteIdentity.rows[0].db !== 'postgres') {
+      throw new Error('Origen de producción inesperado. No se importó ningún dato.')
+    }
+  }
   const identity = await target.query('SELECT current_database() AS db, current_user AS role')
-  if (identity.rows[0].db !== 'accion_animal_dev' || identity.rows[0].role !== 'aa_local_app') {
+  if (identity.rows[0].db !== targetName || identity.rows[0].role !== 'aa_local_app') {
     throw new Error('Destino local inesperado.')
   }
   await source.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+  if (production && (await source.query('SHOW transaction_read_only')).rows[0].transaction_read_only !== 'on') {
+    throw new Error('La transacción de producción no es de solo lectura.')
+  }
   await target.query('BEGIN')
   targetStarted = true
 
   for (const table of [...tables.slice(1), 'sync_operations']) {
     const { rows } = await target.query(`SELECT EXISTS (SELECT 1 FROM aa_local.${table}) AS occupied`)
     if (rows[0].occupied) throw new Error(`El destino ya contiene ${table}; se canceló la importación.`)
+  }
+  if (production) {
+    const state = await target.query("SELECT count(*)::integer AS total FROM aa_local.sync_state WHERE stream IN ('business_outbound', 'profiles_inbound', 'business_inbound')")
+    if (state.rows[0].total !== 3) throw new Error('Faltan los tres estados de sincronización locales.')
   }
 
   const existingProfiles = await target.query('SELECT id FROM aa_local.profiles')
@@ -108,7 +143,7 @@ try {
   if (apply) {
     await target.query('COMMIT')
     targetStarted = false
-    console.log('Datos de PRUEBAS importados en accion_animal_dev:', counts)
+    console.log(`Datos de ${production ? 'PRODUCCIÓN' : 'PRUEBAS'} importados en ${targetName}:`, counts)
   } else {
     await target.query('ROLLBACK')
     targetStarted = false

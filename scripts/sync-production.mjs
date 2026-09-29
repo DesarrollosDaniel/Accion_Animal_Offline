@@ -1,23 +1,24 @@
 import { Client } from 'pg'
 import { readFile } from 'node:fs/promises'
 import { setTimeout } from 'node:timers/promises'
-import { createInterface } from 'node:readline/promises'
-import { assertTestEnvironment, testProjectRef } from './test-environment.mjs'
-import { sendPending, syncErrorCode, reviewConflict, resolveReviewedConflict, receiveProfiles, comparePets, receivePet, receivePetBatch, receiveNewPetBatch, receiveClinicalRecordBatch, receiveClinicalBatch, receiveDeletedBatch, receiveAuditBatch, clinicalResourceTables } from '../server/local-sync.mjs'
+import { assertProductionEnvironment, productionRef } from './production-environment.mjs'
+import { sendPending, syncErrorCode, receiveProfiles, receivePetBatch, receiveNewPetBatch, receiveClinicalRecordBatch, receiveClinicalBatch, receiveDeletedBatch, receiveAuditBatch, clinicalResourceTables } from '../server/local-sync.mjs'
 
-assertTestEnvironment()
+assertProductionEnvironment()
 const mode = process.argv[2] || '--check'
-if (['--resolve-local', '--pet-receive'].includes(mode) ? process.argv.length !== 4 : process.argv.length > 3 || !['--check', '--once', '--watch', '--profiles', '--pets-check'].includes(mode)) throw new Error('Uso: sync-test-data.mjs [--check|--once|--watch|--profiles|--pets-check|--resolve-local UUID|--pet-receive UUID]')
-if (!process.env.AA_DB_PASSWORD || !process.env.AA_SYNC_DB_URL) throw new Error('Carga AA_DB_PASSWORD y AA_SYNC_DB_URL en esta terminal; no las compartas.')
-let address
-try { address = new URL(process.env.AA_SYNC_DB_URL) } catch { throw new Error('URI de sincronización inválida.') }
-if (!['postgres:', 'postgresql:'].includes(address.protocol) || !/^aws-[a-z0-9-]+\.pooler\.supabase\.com$/.test(address.hostname)
-  || decodeURIComponent(address.username) !== `aa_sync_worker.${testProjectRef}` || address.port !== '5432' || address.pathname !== '/postgres' || address.search || address.hash) {
-  throw new Error('Usa Session pooler, puerto 5432, usuario aa_sync_worker del proyecto de PRUEBAS; sin parámetros adicionales.')
+if (process.argv.length > 3 || !['--check', '--once', '--watch'].includes(mode)) throw new Error('Uso: sync-production.mjs [--check|--once|--watch]')
+if (!process.env.AA_DB_PASSWORD || !process.env.AA_PROD_WORKER_PASSWORD
+  || !/^aws-[a-z0-9-]+\.pooler\.supabase\.com$/.test(process.env.AA_PROD_DB_HOST || '')) {
+  throw new Error('Carga host de Session pooler y contraseñas local/del trabajador de PRODUCCIÓN; no las compartas.')
 }
-const remoteSettings = { connectionString: address.toString(), ssl: { rejectUnauthorized: true, ...(process.env.AA_SYNC_CA_FILE ? { ca: await readFile(process.env.AA_SYNC_CA_FILE, 'utf8') } : {}) }, connectionTimeoutMillis: 5000, statement_timeout: 10000 }
+const remoteSettings = {
+  host: process.env.AA_PROD_DB_HOST, port: 5432, database: 'postgres',
+  user: `aa_sync_worker.${productionRef}`, password: process.env.AA_PROD_WORKER_PASSWORD,
+  ssl: { rejectUnauthorized: true, ...(process.env.AA_SYNC_CA_FILE ? { ca: await readFile(process.env.AA_SYNC_CA_FILE, 'utf8') } : {}) },
+  connectionTimeoutMillis: 5000, statement_timeout: 10000,
+}
 let remote
-const local = new Client({ host: '127.0.0.1', ssl: false, port: 5432, database: 'accion_animal_dev', user: 'aa_local_app', password: process.env.AA_DB_PASSWORD, connectionTimeoutMillis: 5000, statement_timeout: 10000 })
+const local = new Client({ host: '127.0.0.1', ssl: false, port: Number(process.env.AA_DB_PORT || 5432), database: 'accion_animal_produ', user: 'aa_local_app', password: process.env.AA_DB_PASSWORD, connectionTimeoutMillis: 5000, statement_timeout: 10000 })
 let stopping = false
 let profilesReported = false
 let petCursor = null
@@ -34,7 +35,7 @@ try {
   await local.connect()
   stage = 'cuenta y bloqueo locales'
   const identity = await local.query('SELECT current_database() AS db, current_user AS role, pg_try_advisory_lock(904500) AS locked')
-  if (identity.rows[0].db !== 'accion_animal_dev' || identity.rows[0].role !== 'aa_local_app' || !identity.rows[0].locked) throw new Error('Destino incorrecto o hay otro sincronizador ejecutándose.')
+  if (identity.rows[0].db !== 'accion_animal_produ' || identity.rows[0].role !== 'aa_local_app' || !identity.rows[0].locked) throw new Error('Destino incorrecto o hay otro sincronizador ejecutándose.')
   if (['--once', '--watch'].includes(mode)) {
     stage = 'migraciones locales de recepción (005, 006 y 007)'
     for (const table of ['clinical_records', ...clinicalResourceTables]) {
@@ -56,49 +57,30 @@ try {
       if (remoteIdentity.rows[0].role !== 'aa_sync_worker' || remoteIdentity.rows[0].db !== 'postgres') throw new Error('Cuenta remota inesperada.')
       stage = 'permisos de confirmaciones remotas'
       await remote.query('SELECT operation_id FROM aa_sync.receipts LIMIT 0')
-      if (mode === '--resolve-local') {
-        stage = 'revisión de la edición en conflicto'
-        const review = await reviewConflict(local, remote, process.argv[3])
-        console.log('Cambios propuestos:', JSON.stringify(review.differences, null, 2))
-        const prompt = createInterface({ input: process.stdin, output: process.stdout })
-        let answer
-        try { answer = await prompt.question('Escribe APLICAR para conservar esta edición local: ') } finally { prompt.close() }
-        if (answer.trim() === 'APLICAR') {
-          console.log('Resolución:', await resolveReviewedConflict(local, remote, review.operation, review.remote_hash))
-        } else console.log('Cancelado; no se enviaron cambios.')
-      } else if (mode === '--pet-receive') {
-        stage = 'recepción manual de mascota'
-        console.log('Mascota de PRUEBAS recibida:', await receivePet(local, remote, process.argv[3]))
-      } else if (mode === '--pets-check') {
-        stage = 'comparación de mascotas (solo lectura)'
-        console.log('Comparación de mascotas, sin modificar datos:', JSON.stringify(await comparePets(local, remote), null, 2))
-      } else if (mode === '--profiles') {
-        stage = 'recepción de perfiles'
-        console.log('Perfiles de PRUEBAS recibidos:', await receiveProfiles(local, remote))
-      } else if (mode === '--check') {
+      stage = 'permisos de auditoría remota'
+      await remote.query('SELECT id FROM public.audit_events LIMIT 0')
+      if (mode === '--check') {
         stage = 'lectura de la cola local'
         const pending = await local.query('SELECT status, count(*)::integer AS total FROM aa_local.sync_operations GROUP BY status ORDER BY status')
         console.log('Conexiones y confirmaciones disponibles. Sin enviar cambios:', pending.rows)
+        const queued = await local.query("SELECT id, entity_table, entity_id, action, status FROM aa_local.sync_operations WHERE status = 'pending' ORDER BY created_at LIMIT 50")
+        if (queued.rows.length) console.log('Pendientes que se enviarían (sin valores):', queued.rows)
         const problems = await local.query(`SELECT op.id, op.entity_table, op.entity_id, op.action, op.source_version, op.status,
           (op.payload ? '_sync_base') AS has_original, dep.status AS previous_status
           FROM aa_local.sync_operations AS op
           LEFT JOIN aa_local.sync_operations AS dep ON dep.id = op.depends_on_operation_id
           WHERE op.status IN ('conflict', 'blocked') ORDER BY op.created_at LIMIT 50`)
         if (problems.rows.length) console.log('Operaciones que requieren revisión (sin datos clínicos):', problems.rows)
-        for (const problem of problems.rows.filter((row) => row.action === 'UPDATE' && row.status === 'conflict')) {
-          stage = 'comparación del conflicto (solo lectura)'
-          console.log('Comparación local / Supabase:', JSON.stringify(await reviewConflict(local, remote, problem.id), null, 2))
-        }
       } else {
         stage = 'recepción de perfiles'
         const profiles = await receiveProfiles(local, remote)
-        if (!profilesReported || mode === '--once') console.log('Perfiles de PRUEBAS recibidos:', profiles)
+        if (!profilesReported || mode === '--once') console.log('Perfiles de PRODUCCIÓN recibidos:', profiles)
         profilesReported = true
         stage = 'envío de la cola'
         const counts = await sendPending(local, remote)
         const unresolved = await local.query("SELECT EXISTS (SELECT 1 FROM aa_local.sync_operations WHERE status <> 'confirmed') AS pending")
         await local.query("UPDATE aa_local.sync_state SET last_attempt_at = now(), last_success_at = CASE WHEN $1 THEN now() ELSE last_success_at END, last_error = CASE WHEN $1 THEN NULL ELSE 'Hay operaciones pendientes o en conflicto' END, updated_at = now() WHERE stream = 'business_outbound'", [!unresolved.rows[0].pending])
-        if (Object.values(counts).some(Boolean) || mode === '--once') console.log('Sincronización de PRUEBAS:', counts)
+        if (Object.values(counts).some(Boolean) || mode === '--once') console.log('Sincronización de PRODUCCIÓN:', counts)
         if (inboundCursor === null) {
           const start = await remote.query('SELECT COALESCE(max(id), 0)::text AS id FROM public.audit_events')
           inboundCursor = `bootstrap:${start.rows[0].id}`
@@ -108,7 +90,7 @@ try {
           stage = 'recepción incremental'
           const incoming = await receiveAuditBatch(local, remote, inboundCursor)
           inboundCursor = incoming.cursor
-          if (incoming.checked || incoming.retry || mode === '--once') console.log('Cambios remotos de PRUEBAS:', incoming)
+          if (incoming.checked || incoming.retry || mode === '--once') console.log('Cambios remotos de PRODUCCIÓN:', incoming)
         } else {
           stage = 'recepción automática de mascotas'
           if (!bootstrapDone.has('pets')) {
@@ -117,7 +99,7 @@ try {
             if (petCursor === null) bootstrapDone.add('pets')
             if (incoming.received || incoming.protected || mode === '--once') {
               const { cursor, ...totals } = incoming
-              console.log('Recepción de mascotas de PRUEBAS:', totals)
+              console.log('Recepción de mascotas de PRODUCCIÓN:', totals)
             }
           }
           stage = 'recepción automática de mascotas nuevas'
@@ -127,7 +109,7 @@ try {
             if (newPetCursor === null) bootstrapDone.add('new_pets')
             if (newPets.received || newPets.protected || mode === '--once') {
               const { cursor, ...totals } = newPets
-              console.log('Mascotas nuevas de PRUEBAS:', totals)
+              console.log('Mascotas nuevas de PRODUCCIÓN:', totals)
             }
           }
           stage = 'recepción automática de expedientes clínicos'
@@ -137,7 +119,7 @@ try {
             if (clinicalCursor === null) bootstrapDone.add('clinical_records')
             if (records.received || records.protected || mode === '--once') {
               const { cursor, ...totals } = records
-              console.log('Expedientes clínicos de PRUEBAS:', totals)
+              console.log('Expedientes clínicos de PRODUCCIÓN:', totals)
             }
           }
           for (const table of clinicalResourceTables) {
@@ -148,7 +130,7 @@ try {
             if (resources.cursor === null) bootstrapDone.add(table)
             if (resources.received || resources.protected || mode === '--once') {
               const { cursor, ...totals } = resources
-              console.log('Recursos clínicos de PRUEBAS (%s):', table, totals)
+              console.log('Recursos clínicos de PRODUCCIÓN (%s):', table, totals)
             }
           }
           for (const table of [...clinicalResourceTables, 'clinical_records', 'pets']) {
@@ -159,8 +141,8 @@ try {
             if (deletions.cursor === null) bootstrapDone.add(`deleted_${table}`)
             if (deletions.deleted || deletions.protected || mode === '--once') {
               const { cursor, ...totals } = deletions
-              if (table === 'pets') console.log('Eliminaciones de mascotas de PRUEBAS:', totals)
-              else console.log('Eliminaciones clínicas de PRUEBAS (%s):', table, totals)
+              if (table === 'pets') console.log('Eliminaciones de mascotas de PRODUCCIÓN:', totals)
+              else console.log('Eliminaciones clínicas de PRODUCCIÓN (%s):', table, totals)
             }
           }
           if (bootstrapDone.size === 17) {
@@ -177,7 +159,7 @@ try {
     } finally {
       await remote.end().catch(() => {})
     }
-    if (mode === '--watch' && !stopping) await setTimeout(30000)
+    if (mode === '--watch' && !stopping) await setTimeout(inboundCursor?.startsWith('bootstrap:') ? 2000 : 30000)
   } while (mode === '--watch' && !stopping)
 } catch (error) {
   console.error(`Fallo en ${stage}. Código: ${syncErrorCode(error)}.`)

@@ -127,6 +127,7 @@ test('rechaza escrituras de recepción y de otro origen', async () => {
 test('no conecta si falta la contraseña y limita usuario, host y nombre de base', async () => {
   assert.equal(createLocalPool({}), null)
   assert.throws(() => createLocalPool({ AA_DB_PASSWORD: 'x', AA_DB_NAME: 'postgres' }), /AA_DB_NAME/)
+  assert.throws(() => createLocalPool({ AA_MODE: 'production', AA_DB_PASSWORD: 'x', AA_DB_NAME: 'accion_animal_dev' }), /AA_DB_NAME/)
   const pool = createLocalPool({ AA_DB_PASSWORD: 'x', AA_DB_NAME: 'accion_animal_dev' })
   assert.equal(pool.options.user, 'aa_local_app')
   assert.equal(pool.options.host, '127.0.0.1')
@@ -134,6 +135,9 @@ test('no conecta si falta la contraseña y limita usuario, host y nombre de base
   assert.equal(pool.options.types.getTypeParser(1082, 'text')('2022-05-10'), '2022-05-10')
   assert.equal(pool.options.types.getTypeParser(1700, 'text')('12.500'), 12.5)
   await pool.end()
+  const productionPool = createLocalPool({ AA_MODE: 'production', AA_DB_PASSWORD: 'x', AA_DB_NAME: 'accion_animal_produ' })
+  assert.equal(productionPool.options.database, 'accion_animal_produ')
+  await productionPool.end()
 })
 
 test('guarda el perfil verificado usando parámetros SQL', async () => {

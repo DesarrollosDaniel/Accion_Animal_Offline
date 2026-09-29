@@ -42,7 +42,7 @@ function pageOptions(url) {
   if (!/^\d+$/.test(rawLimit) || !/^\d+$/.test(rawOffset)) return null
   const limit = Number(rawLimit)
   const offset = Number(rawOffset)
-  if (limit < 1 || limit > 200 || offset > 10000) return null
+  if (limit < 1 || limit > 200 || offset > 50000) return null
   return { limit, offset }
 }
 
@@ -51,7 +51,9 @@ export function createLocalPool(env = process.env) {
   const port = Number(env.AA_DB_PORT || 5432)
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('AA_DB_PORT no es válido.')
   const database = env.AA_DB_NAME || 'accion_animal_dev'
-  if (database !== 'accion_animal_dev') throw new Error('AA_DB_NAME debe ser accion_animal_dev en este entorno de pruebas.')
+  if (database !== (env.AA_MODE === 'production' ? 'accion_animal_produ' : 'accion_animal_dev')) {
+    throw new Error('AA_DB_NAME no corresponde al entorno seleccionado.')
+  }
   return new Pool({
     host: '127.0.0.1', ssl: false, port, database, user: 'aa_local_app', password: env.AA_DB_PASSWORD,
     max: 5, connectionTimeoutMillis: 3000, idleTimeoutMillis: 10000,

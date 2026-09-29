@@ -1,8 +1,27 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { applyRemoteOperation, canonicalRow, sendPending, syncErrorCode, reviewConflict, resolveReviewedConflict, SyncConflict } from './local-sync.mjs'
+import { applyRemoteOperation, canonicalRow, sendPending, syncErrorCode, reviewConflict, resolveReviewedConflict, receiveAuditBatch, SyncConflict } from './local-sync.mjs'
 
 const op = { id: '11111111-1111-4111-8111-111111111111', entity_id: '22222222-2222-4222-8222-222222222222', actor_id: '33333333-3333-4333-8333-333333333333', entity_table: 'pet_notes', action: 'INSERT', source_version: '1', payload: { id: '22222222-2222-4222-8222-222222222222', body: 'Ficticio' } }
+const isBusinessWrite = (sql) => /^(INSERT|UPDATE|DELETE)/.test(sql) && !sql.includes('aa_local.inbound_retry')
+
+test('auditoría avanza el cursor y conserva para reintento los cambios protegidos', async () => {
+  const calls = []
+  const local = { async query(sql, values) {
+    calls.push({ sql, values })
+    if (sql.includes('FROM aa_local.sync_operations')) return { rows: [{ id: op.id }] }
+    if (sql.startsWith('SELECT entity_table, entity_id FROM aa_local.inbound_retry')) return { rows: [] }
+    return { rows: [] }
+  } }
+  const remote = { async query(sql, values) {
+    calls.push({ sql, values })
+    return { rows: [{ id: '9', entity_table: 'pet_notes', entity_id: op.entity_id }] }
+  } }
+  assert.deepEqual(await receiveAuditBatch(local, remote, '8'), { checked: 1, cursor: '9', retry: 0 })
+  assert.ok(calls.some(({ sql }) => sql.startsWith('INSERT INTO aa_local.inbound_retry')))
+  assert.deepEqual(calls.find(({ sql }) => sql.startsWith('UPDATE aa_local.sync_state')).values, ['9'])
+  await assert.rejects(receiveAuditBatch(local, remote, 'invalid'), SyncConflict)
+})
 
 test('el diagnóstico identifica fallos conocidos sin imprimir mensajes ni códigos arbitrarios', () => {
   assert.equal(syncErrorCode({ code: '28P01', message: 'password secret' }), '28P01')
@@ -125,17 +144,18 @@ test('la resolución revisada confirma el cambio y se detiene si Supabase cambi�
   assert.equal(changed.calls.some(({ sql }) => sql.startsWith('UPDATE public.')), false)
 })
 
-test('recepción de perfiles revoca credenciales sin borrar historia; errores revierten todo', async () => {
+test('recepción de perfiles acepta dos owners y revoca credenciales sin borrar historia', async () => {
   const { receiveProfiles, SyncConflict } = await import('./local-sync.mjs')
   const calls = []
   const row = { id: op.actor_id, display_name: 'Ficticio', role: 'owner', is_active: true, created_at: new Date(), updated_at: new Date() }
-  const remote = { query: async () => ({ rows: [row] }) }
+  const remote = { query: async () => ({ rows: [row, { ...row, id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }] }) }
   const local = { async query(sql, values) { calls.push({ sql, values }); return { rows: [] } } }
-  assert.deepEqual(await receiveProfiles(local, remote), { profiles: 1 })
+  assert.deepEqual(await receiveProfiles(local, remote), { profiles: 2 })
   assert.equal(calls.at(-1).sql, 'COMMIT')
+  assert.equal(calls.some(({ sql }) => sql.includes("SET role = 'reception'")), false)
   assert.ok(calls.some(({ sql }) => sql.startsWith('DELETE FROM aa_local.login_credentials')))
   assert.ok(!calls.some(({ sql }) => sql.startsWith('DELETE FROM aa_local.profiles')))
-  assert.deepEqual(calls.find(({ sql }) => sql.includes('ANY($1')).values, [[op.actor_id]])
+  assert.deepEqual(calls.find(({ sql }) => sql.includes('ANY($1')).values, [[op.actor_id, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa']])
   calls.length = 0
   await assert.rejects(receiveProfiles(local, { query: async () => ({ rows: [{ ...row, role: 'admin' }] }) }), SyncConflict)
   assert.equal(calls.length, 0)
@@ -233,7 +253,7 @@ test('recepción automática usa lotes, omite pendientes y ausencias y no escrib
   const missing = { id: op.id, name: 'Solo local' }
   const local = { async query(sql, values) {
     calls.push({ sql, values })
-    if (sql.includes('LIMIT 50')) return { rows: [{ snapshot: a, pending: false }, { snapshot: b, pending: true }, { snapshot: missing, pending: false }] }
+    if (sql.includes('LIMIT 500')) return { rows: [{ snapshot: a, pending: false }, { snapshot: b, pending: true }, { snapshot: missing, pending: false }] }
     if (sql.includes('FROM aa_local.profiles')) return { rows: [{ id: op.actor_id }] }
     return { rows: [] }
   } }
@@ -244,7 +264,7 @@ test('recepción automática usa lotes, omite pendientes y ausencias y no escrib
     return { rows: [] }
   } }
   assert.deepEqual(await receivePetBatch(local, remote), { checked: 3, received: 0, protected: 1, cursor: null })
-  assert.ok(!calls.some(({ sql }) => /^(UPDATE|INSERT|DELETE)/.test(sql)))
+  assert.ok(!calls.some(({ sql }) => isBusinessWrite(sql)))
   assert.ok(calls.find(({ sql }) => sql.includes('ANY($1')).values[0].includes(a.id))
 })
 
@@ -255,7 +275,7 @@ test('el lote vuelve a comprobar pendientes bajo bloqueo antes de importar y con
   let concurrentPending = true
   const local = { async query(sql, values) {
     calls.push({ sql, values })
-    if (sql.includes('LIMIT 50')) return { rows: [{ snapshot: pet, pending: false }] }
+    if (sql.includes('LIMIT 500')) return { rows: [{ snapshot: pet, pending: false }] }
     if (sql.includes('FOR UPDATE')) return { rows: [{ ...pet, row_version: '5' }] }
     if (sql.includes('FROM aa_local.sync_operations')) return { rows: concurrentPending ? [{ id: op.id }] : [] }
     if (sql.includes('FROM aa_local.profiles')) return { rows: [{ id: op.actor_id }] }
@@ -273,8 +293,8 @@ test('el lote vuelve a comprobar pendientes bajo bloqueo antes de importar y con
   concurrentPending = false
   assert.equal((await receivePetBatch(local, remote)).received, 1)
   assert.ok(calls.some(({ sql }) => sql.startsWith('UPDATE aa_local.pets')))
-  const page = Array.from({ length: 50 }, (_, i) => ({ snapshot: { ...pet, id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}` }, pending: true }))
-  const full = { async query(sql) { return { rows: sql.includes('LIMIT 50') ? page : [{ id: op.actor_id }] } } }
+  const page = Array.from({ length: 500 }, (_, i) => ({ snapshot: { ...pet, id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}` }, pending: true }))
+  const full = { async query(sql) { return { rows: sql.includes('LIMIT 500') ? page : [{ id: op.actor_id }] } } }
   assert.equal((await receivePetBatch(full, remote, op.id)).cursor, page.at(-1).snapshot.id)
   assert.equal((await receivePetBatch({ query: async () => ({ rows: [] }) }, remote, pet.id)).cursor, null)
 })
@@ -333,7 +353,7 @@ test('descubrimiento de altas omite UUID conocidos y protege una eliminación lo
     return { rows: [] }
   } }
   assert.deepEqual(await receiveNewPetBatch(local, remote), { checked: 2, received: 0, protected: 1, cursor: null })
-  assert.ok(!calls.some((sql) => /^(INSERT|DELETE|UPDATE)/.test(sql)))
+  assert.ok(!calls.some(isBusinessWrite))
 })
 
 test('expedientes recibidos protegen pendientes, requieren mascota y conservan la base sin crear salida', async () => {
@@ -429,8 +449,10 @@ test('recursos clínicos reutilizan recepción protegida, referencias y validaci
     let mismatchPet = false
     let remoteMissing = false
     const calls = []
+    const remoteCalls = []
     const local = { async query(sql, values) {
       calls.push({ sql, values })
+      if (sql.startsWith('SELECT to_jsonb(t) AS snapshot FROM aa_local.')) return { rows: existing ? [{ snapshot: existing }] : [] }
       if (sql.includes('FOR UPDATE')) return { rows: existing ? [existing] : [] }
       if (sql.includes('FOR KEY SHARE')) return { rows: missingParent ? [] : [{ id: sql.includes('clinical_records') ? op.id : op.actor_id, pet_id: mismatchPet ? op.entity_id : op.actor_id }] }
       if (sql.includes('SELECT id FROM aa_local.sync_operations')) return { rows: (sql.includes(`entity_table = '${table}'`) ? pending : deletedParent) ? [{ id: op.id }] : [] }
@@ -440,7 +462,8 @@ test('recursos clínicos reutilizan recepción protegida, referencias y validaci
       if (sql.startsWith(`INSERT INTO aa_local.${table}`)) return { rows: [{ id: snapshot.id }] }
       return { rows: [] }
     } }
-    const remote = { async query(sql) {
+    const remote = { async query(sql, values) {
+      remoteCalls.push({ sql, values })
       if (sql.startsWith('SELECT role')) return { rows: [{ role: 'owner', is_active: !denied }] }
       if (sql.startsWith('SELECT id FROM public.')) return { rows: [{ id: snapshot.id }] }
       if (sql.startsWith('SELECT to_jsonb')) return { rows: remoteMissing ? [] : [{ snapshot }] }
@@ -450,7 +473,9 @@ test('recursos clínicos reutilizan recepción protegida, referencias y validaci
     assert.equal((await receiveClinicalBatch(local, remote, table)).received, 1, table)
     assert.equal(calls.find(({ sql }) => sql.startsWith('INSERT')).values[2], '9')
     existing = { ...snapshot, row_version: '10', remote_base: snapshot, remote_base_version: '9' }
+    remoteCalls.length = 0
     assert.equal((await receiveClinicalBatch(local, remote, table)).received, 0)
+    assert.ok(!remoteCalls.some(({ sql, values }) => sql.startsWith('SELECT to_jsonb') && values?.[0] === snapshot.id))
     existing = { ...existing, ...(table === 'clinical_files' ? { original_name: 'antes.pdf' } : table === 'weight_records' ? { weight_kg: 11 } : { ...Object.fromEntries(Object.keys(fixtures[table]).filter((key) => !key.endsWith('_id')).map((key) => [key, null])) }) }
     calls.length = 0
     assert.equal((await receiveClinicalBatch(local, remote, table)).received, 1)
@@ -463,7 +488,7 @@ test('recursos clínicos reutilizan recepción protegida, referencias y validaci
       existing = null // also protect a deleted local UUID
       calls.length = 0
       assert.equal((await receiveClinicalBatch(local, remote, table)).protected, 1)
-      assert.ok(!calls.some(({ sql }) => /^(INSERT|UPDATE|DELETE)/.test(sql)))
+      assert.ok(!calls.some(({ sql }) => isBusinessWrite(sql)))
     }
     pending = missingParent = deletedParent = remoteMissing = false
     denied = true
@@ -508,7 +533,7 @@ test('eliminaciones clínicas remotas quitan solo filas limpias y revalidan la a
   const calls = []
   const local = { async query(sql) {
     calls.push(sql)
-    if (sql.includes('ORDER BY id LIMIT 50')) return { rows: ids.map((id) => ({ id })) }
+    if (sql.includes('ORDER BY id LIMIT 500')) return { rows: ids.map((id) => ({ id })) }
     if (sql.includes('FROM aa_local.profiles')) return { rows: [{ id: op.actor_id }] }
     if (sql.includes('FOR UPDATE')) return { rows: [{ id: op.entity_id, row_version: '4', remote_base_version: baseline }] }
     if (sql.includes('bool_or')) return { rows: [{ pending, confirmed_version: null }] }
@@ -544,7 +569,7 @@ test('un padre remoto eliminado espera a que desaparezcan sus recursos vinculado
   const calls = []
   const local = { async query(sql) {
     calls.push(sql)
-    if (sql.includes('ORDER BY id LIMIT 50')) return { rows: [{ id: op.entity_id }] }
+    if (sql.includes('ORDER BY id LIMIT 500')) return { rows: [{ id: op.entity_id }] }
     if (sql.includes('FROM aa_local.profiles')) return { rows: [{ id: op.actor_id }] }
     if (sql.includes('FOR UPDATE')) return { rows: [{ id: op.entity_id, row_version: '4', remote_base_version: '4' }] }
     if (sql.includes('bool_or')) return { rows: [{ pending: false, confirmed_version: null }] }

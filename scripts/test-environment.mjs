@@ -59,7 +59,7 @@ export function assertTestEnvironment() {
   const serverEnv = readRequiredFile('.env.server')
   const linkedRef = readRequiredFile('supabase/.temp/project-ref')
   const configuredUrl = envValue(localEnv, 'VITE_SUPABASE_URL')
-  const envFiles = readdirSync(projectRoot).filter((name) => /^\.env(?:\..+)?$/.test(name))
+  const envFiles = readdirSync(projectRoot).filter((name) => /^\.env(?:\..+)?$/.test(name) && name !== '.env.production.local')
   const activeUrls = [
     ...envFiles.flatMap((name) => configuredUrls(readFileSync(path.join(projectRoot, name), 'utf8'))),
     process.env.VITE_SUPABASE_URL,

@@ -1,19 +1,22 @@
 import { createReadStream, createWriteStream } from 'node:fs'
-import { access, copyFile, mkdir, realpath, stat, unlink } from 'node:fs/promises'
+import { access, copyFile, mkdir, readFile, realpath, stat, unlink } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { assertTestEnvironment } from '../scripts/test-environment.mjs'
+import { assertProductionEnvironment, productionRef } from '../scripts/production-environment.mjs'
 import { createLocalPool, handleLocalApi } from './local-api.mjs'
 import { createLocalAuth } from './local-auth.mjs'
 import { LocalApiError, readJsonBody } from './local-writes.mjs'
 
-assertTestEnvironment()
+const production = process.env.AA_MODE === 'production'
+if (production) assertProductionEnvironment()
+else assertTestEnvironment()
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const distRoot = path.join(projectRoot, 'dist')
+const distRoot = path.join(projectRoot, production ? 'dist-production' : 'dist')
 const storageSetting = process.env.AA_STORAGE_ROOT
 const supabaseUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').replace(/\/$/, '')
 const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || ''
@@ -227,10 +230,18 @@ async function serveStatic(req, res, url) {
 
 async function start() {
   if (!storageSetting) throw new Error('Falta AA_STORAGE_ROOT en .env.local.')
+  if (production && !process.env.AA_DB_PASSWORD) throw new Error('Carga AA_DB_PASSWORD para abrir accion_animal_produ.')
   if (!supabaseUrl || !publishableKey) throw new Error('Faltan la URL o la clave publicable de Supabase.')
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('AA_PORT no es válido.')
   if (!Number.isFinite(maxUploadBytes) || maxUploadBytes < 1) throw new Error('AA_MAX_UPLOAD_BYTES no es válido.')
   await access(path.join(distRoot, 'index.html'), constants.R_OK)
+  const buildRef = await readFile(path.join(distRoot, 'project-ref'), 'utf8').catch((error) => {
+    if (error.code === 'ENOENT') return null
+    throw error
+  })
+  if (production ? buildRef !== productionRef : buildRef !== null) {
+    throw new Error('La compilación no corresponde al entorno seleccionado.')
+  }
   const storageRoot = await realpath(path.resolve(projectRoot, storageSetting))
   const localPool = createLocalPool()
   if (localPool) {
@@ -238,7 +249,7 @@ async function start() {
       const { rows } = await localPool.query(
         "SELECT current_user AS db_user, current_database() AS db_name, to_regclass('aa_local.pets') AS pets_table",
       )
-      if (rows[0]?.db_user !== 'aa_local_app' || !rows[0]?.pets_table) {
+      if (rows[0]?.db_user !== 'aa_local_app' || rows[0]?.db_name !== (production ? 'accion_animal_produ' : 'accion_animal_dev') || !rows[0]?.pets_table) {
         throw new Error('La conexión local no usa la cuenta limitada o falta el esquema aa_local.')
       }
     } catch (error) {

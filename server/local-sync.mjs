@@ -3,6 +3,7 @@ import { validateClinicalFile } from './local-writes.mjs'
 
 export const syncTables = ['pets', 'clinical_records', 'clinical_files', 'vaccinations', 'medications', 'allergies', 'pet_notes', 'weight_records']
 export const clinicalResourceTables = ['vaccinations', 'medications', 'allergies', 'pet_notes', 'weight_records', 'clinical_files']
+const inboundBatchSize = 500
 const dateFields = new Set(['birth_date', 'sterilization_date', 'administered_on', 'next_due_on', 'starts_on', 'ends_on', 'diagnosed_on'])
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const metadata = new Set(['row_version', 'deleted_at', 'cascade_delete_operations', '_sync_base', 'remote_base', 'remote_base_version'])
@@ -204,14 +205,10 @@ export async function receiveProfiles(local, remote) {
   // ponytail: snapshot completo de hasta 1000 perfiles; paginar con REPEATABLE READ si la clínica supera ese límite.
   const { rows } = await remote.query('SELECT id, display_name, role, is_active, created_at, updated_at FROM public.profiles ORDER BY id LIMIT 1001')
   if (rows.length > 1000 || rows.some((row) => !uuid.test(row.id) || typeof row.display_name !== 'string'
-    || !['owner', 'veterinarian', 'reception'].includes(row.role) || typeof row.is_active !== 'boolean')
-    || rows.filter((row) => row.role === 'owner').length > 1) throw new SyncConflict('Perfiles remotos inválidos; se conserva el acceso local.')
+    || !['owner', 'veterinarian', 'reception'].includes(row.role) || typeof row.is_active !== 'boolean')) throw new SyncConflict('Perfiles remotos inválidos; se conserva el acceso local.')
   const ids = rows.map((row) => row.id)
-  const owner = rows.find((row) => row.role === 'owner')?.id || null
   await local.query('BEGIN')
   try {
-    // Release the unique owner slot before applying a remote transfer.
-    await local.query("UPDATE aa_local.profiles SET role = 'reception' WHERE role = 'owner' AND id IS DISTINCT FROM $1::uuid", [owner])
     await local.query(`INSERT INTO aa_local.profiles (id, display_name, role, is_active, created_at, updated_at)
       SELECT id, display_name, role::aa_local.app_role, is_active, created_at, updated_at
       FROM jsonb_to_recordset($1::jsonb) AS p(id uuid, display_name text, role text, is_active boolean, created_at timestamptz, updated_at timestamptz)
@@ -308,6 +305,10 @@ async function receiveRow(local, remote, table, petId, skipPending, allowCreate)
     const result = await remote.query(`SELECT to_jsonb(p) AS snapshot FROM public.${table} p WHERE id = $1`, [petId])
     const snapshot = result.rows[0]?.snapshot
     if (!snapshot || snapshot.id !== petId) {
+      if (skipPending && allowCreate) {
+        await local.query('ROLLBACK')
+        return { received: false, reason: 'remote_unavailable', id: petId }
+      }
       if (table !== 'pets') {
         await local.query('ROLLBACK')
         return { received: false, reason: 'remote_unavailable', id: petId }
@@ -337,10 +338,10 @@ async function receiveRow(local, remote, table, petId, skipPending, allowCreate)
         validateClinicalFile(Object.fromEntries(['kind', 'object_path', 'original_name', 'mime_type', 'size_bytes', 'checksum_sha256']
           .map((field) => [field, field === 'size_bytes' ? Number(snapshot[field]) : snapshot[field]])))
       }
-      if (existing.rows[0] && petContent(existing.rows[0]) === petContent(snapshot)) {
-        await local.query('ROLLBACK')
-        return { received: false, reason: 'unchanged', id: petId }
-      }
+    }
+    if (existing.rows[0] && petContent(existing.rows[0]) === petContent(snapshot)) {
+      await local.query('ROLLBACK')
+      return { received: false, reason: 'unchanged', id: petId }
     }
     const fields = Object.keys(snapshot)
     const schema = await local.query(`SELECT column_name FROM information_schema.columns WHERE table_schema = 'aa_local' AND table_name = '${table}'`)
@@ -383,12 +384,11 @@ function petContent(row) {
 
 export async function receivePetBatch(local, remote, cursor = null) {
   if (cursor !== null && !uuid.test(cursor)) throw new SyncConflict('Cursor de mascotas inválido.')
-  // ponytail: 50 mascotas cada 30 segundos, vuelta completa en ceil(N/50) ciclos;
-  // usar un registro remoto de cambios si esa latencia deja de ser aceptable.
+  // La carga inicial usa lotes; después se leen los cambios del registro de auditoría.
   const page = await local.query(`SELECT to_jsonb(p) AS snapshot, EXISTS (
     SELECT 1 FROM aa_local.sync_operations op WHERE op.entity_table = 'pets'
       AND op.entity_id = p.id AND op.status <> 'confirmed') AS pending
-    FROM aa_local.pets p WHERE ($1::uuid IS NULL OR p.id > $1::uuid) ORDER BY p.id LIMIT 50`, [cursor])
+    FROM aa_local.pets p WHERE ($1::uuid IS NULL OR p.id > $1::uuid) ORDER BY p.id LIMIT ${inboundBatchSize}`, [cursor])
   const counts = { checked: page.rows.length, received: 0, protected: 0 }
   if (!page.rows.length) return { ...counts, cursor: null }
   const actors = await local.query("SELECT id FROM aa_local.profiles WHERE is_active AND role IN ('owner', 'veterinarian') ORDER BY id LIMIT 1")
@@ -407,15 +407,15 @@ export async function receivePetBatch(local, remote, cursor = null) {
   }
   const remoteRows = new Map(cloud.rows.map(({ snapshot }) => [snapshot.id, snapshot]))
   for (const row of page.rows) {
-    if (row.pending) { counts.protected++; continue }
+    if (row.pending) { counts.protected++; await rememberInboundRetry(local, 'pets', row.snapshot.id); continue }
     const incoming = remoteRows.get(row.snapshot.id)
     // Remote absence is not authorization for deletion.
     if (!incoming || petContent(incoming) === petContent(row.snapshot)) continue
     const result = await receivePet(local, remote, row.snapshot.id, true)
     if (result.received) counts.received++
-    else counts.protected++
+    else { counts.protected++; await rememberInboundRetry(local, 'pets', row.snapshot.id) }
   }
-  return { ...counts, cursor: page.rows.length === 50 ? page.rows.at(-1).snapshot.id : null }
+  return { ...counts, cursor: page.rows.length === inboundBatchSize ? page.rows.at(-1).snapshot.id : null }
 }
 
 export async function receiveNewPetBatch(local, remote, cursor = null) {
@@ -430,8 +430,7 @@ export async function receiveNewPetBatch(local, remote, cursor = null) {
     await remote.query('SET LOCAL ROLE authenticated')
     const profile = await remote.query('SELECT role, is_active FROM public.profiles WHERE id = $1', [actor])
     if (!profile.rows[0]?.is_active || !['owner', 'veterinarian'].includes(profile.rows[0].role)) throw new SyncConflict('El perfil remoto no tiene permiso clínico.')
-    // ponytail: descubre 50 UUID por ciclo; un registro remoto de cambios reduce la latencia en clínicas grandes.
-    page = await remote.query('SELECT id FROM public.pets WHERE ($1::uuid IS NULL OR id > $1::uuid) ORDER BY id LIMIT 50', [cursor])
+    page = await remote.query(`SELECT id FROM public.pets WHERE ($1::uuid IS NULL OR id > $1::uuid) ORDER BY id LIMIT ${inboundBatchSize}`, [cursor])
   } finally {
     await remote.query('ROLLBACK').catch(() => {})
   }
@@ -445,13 +444,49 @@ export async function receiveNewPetBatch(local, remote, cursor = null) {
     // receivePet also checks tombstone operations even when no local pet row remains.
     const result = await receivePet(local, remote, id, true, true)
     if (result.received) counts.received++
-    else counts.protected++
+    else { counts.protected++; await rememberInboundRetry(local, 'pets', id) }
   }
-  return { ...counts, cursor: ids.length === 50 ? ids.at(-1) : null }
+  return { ...counts, cursor: ids.length === inboundBatchSize ? ids.at(-1) : null }
 }
 
 export async function receiveClinicalRecordBatch(local, remote, cursor = null) {
   return receiveClinicalBatch(local, remote, 'clinical_records', cursor)
+}
+
+async function receiveChangedEntity(local, remote, table, id) {
+  const result = await receiveRow(local, remote, table, id, true, true)
+  if (result.reason !== 'remote_unavailable') return result.reason !== 'local_pending' && result.reason !== 'parent_unavailable'
+  const deleted = await receiveDeletedBatch(local, remote, table, null, [id])
+  return deleted.protected === 0
+}
+
+async function rememberInboundRetry(local, table, id) {
+  await local.query('INSERT INTO aa_local.inbound_retry (entity_table, entity_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [table, id])
+}
+
+export async function receiveAuditBatch(local, remote, cursor) {
+  if (!/^\d+$/.test(cursor)) throw new SyncConflict('Cursor de auditoría inválido.')
+  const { rows } = await remote.query(`SELECT id, entity_table, entity_id FROM public.audit_events
+    WHERE id > $1::bigint ORDER BY id LIMIT 100`, [cursor])
+  const latest = new Map(rows.filter((row) => syncTables.includes(row.entity_table) && uuid.test(row.entity_id))
+    .map((row) => [`${row.entity_table}:${row.entity_id}`, row]))
+  const priority = ['pets', 'clinical_records', ...clinicalResourceTables]
+  for (const event of [...latest.values()].sort((a, b) => priority.indexOf(a.entity_table) - priority.indexOf(b.entity_table))) {
+    const resolved = await receiveChangedEntity(local, remote, event.entity_table, event.entity_id)
+    if (resolved) await local.query('DELETE FROM aa_local.inbound_retry WHERE entity_table = $1 AND entity_id = $2', [event.entity_table, event.entity_id])
+    else await rememberInboundRetry(local, event.entity_table, event.entity_id)
+  }
+  const next = rows.at(-1)?.id?.toString() || cursor
+  await local.query("UPDATE aa_local.sync_state SET cursor = $1, last_success_at = now(), updated_at = now() WHERE stream = 'business_inbound'", [next])
+  const retries = await local.query(`SELECT entity_table, entity_id FROM aa_local.inbound_retry
+    WHERE last_attempt_at IS NULL OR last_attempt_at < now() - interval '5 minutes'
+    ORDER BY last_attempt_at NULLS FIRST, entity_table, entity_id LIMIT 50`)
+  for (const { entity_table, entity_id } of retries.rows) {
+    if (await receiveChangedEntity(local, remote, entity_table, entity_id)) {
+      await local.query('DELETE FROM aa_local.inbound_retry WHERE entity_table = $1 AND entity_id = $2', [entity_table, entity_id])
+    } else await local.query('UPDATE aa_local.inbound_retry SET last_attempt_at = now() WHERE entity_table = $1 AND entity_id = $2', [entity_table, entity_id])
+  }
+  return { checked: rows.length, cursor: next, retry: retries.rows.length }
 }
 
 export async function receiveClinicalBatch(local, remote, table, cursor = null) {
@@ -461,34 +496,42 @@ export async function receiveClinicalBatch(local, remote, table, cursor = null) 
   const actor = actors.rows[0]?.id
   if (!actor || !uuid.test(actor)) throw new SyncConflict('Falta un perfil clínico activo.')
   let page
+  let cloud
   await remote.query('BEGIN READ ONLY')
   try {
     await remote.query("SELECT set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: actor, role: 'authenticated' })])
     await remote.query('SET LOCAL ROLE authenticated')
     const profile = await remote.query('SELECT role, is_active FROM public.profiles WHERE id = $1', [actor])
     if (!profile.rows[0]?.is_active || !['owner', 'veterinarian'].includes(profile.rows[0].role)) throw new SyncConflict('El perfil remoto no tiene permiso clínico.')
-    // ponytail: descubre 50 UUID por ciclo; un registro remoto de cambios reduce la latencia en clínicas grandes.
-    page = await remote.query(`SELECT id FROM public.${table} WHERE ($1::uuid IS NULL OR id > $1::uuid) ORDER BY id LIMIT 50`, [cursor])
+    page = await remote.query(`SELECT id FROM public.${table} WHERE ($1::uuid IS NULL OR id > $1::uuid) ORDER BY id LIMIT ${inboundBatchSize}`, [cursor])
+    if (page.rows.length) cloud = await remote.query(`SELECT to_jsonb(t) AS snapshot FROM public.${table} t WHERE id = ANY($1::uuid[])`, [page.rows.map((row) => row.id)])
   } finally {
     await remote.query('ROLLBACK').catch(() => {})
   }
   const counts = { checked: page.rows.length, received: 0, protected: 0 }
   if (!page.rows.length) return { ...counts, cursor: null }
   const ids = page.rows.map((row) => row.id)
+  const localRows = await local.query(`SELECT to_jsonb(t) AS snapshot FROM aa_local.${table} t WHERE id = ANY($1::uuid[])`, [ids])
+  const incoming = new Map(cloud.rows.map(({ snapshot }) => [snapshot.id, snapshot]))
+  const existing = new Map(localRows.rows.map(({ snapshot }) => [snapshot.id, snapshot]))
   for (const id of ids) {
+    if (!incoming.has(id)) { counts.protected++; await rememberInboundRetry(local, table, id); continue }
+    if (existing.has(id) && petContent(existing.get(id)) === petContent(incoming.get(id))) continue
     // Recheck pending operations under the row lock, including local deletions.
     const result = await receiveRow(local, remote, table, id, true, true)
     if (result.received) counts.received++
-    else if (result.reason !== 'unchanged') counts.protected++
+    else if (result.reason !== 'unchanged') { counts.protected++; await rememberInboundRetry(local, table, id) }
   }
-  return { ...counts, cursor: ids.length === 50 ? ids.at(-1) : null }
+  return { ...counts, cursor: ids.length === inboundBatchSize ? ids.at(-1) : null }
 }
 
 // Parents are removed only after their linked resources are gone.
-export async function receiveDeletedBatch(local, remote, table, cursor = null) {
+export async function receiveDeletedBatch(local, remote, table, cursor = null, ids = null) {
   if (!syncTables.includes(table)) throw new SyncConflict('Recurso inválido.')
   if (cursor !== null && !uuid.test(cursor)) throw new SyncConflict('Cursor clínico inválido.')
-  const page = await local.query(`SELECT id FROM aa_local.${table} WHERE ($1::uuid IS NULL OR id > $1::uuid) ORDER BY id LIMIT 50`, [cursor])
+  const page = ids
+    ? await local.query(`SELECT id FROM aa_local.${table} WHERE id = ANY($1::uuid[])`, [ids])
+    : await local.query(`SELECT id FROM aa_local.${table} WHERE ($1::uuid IS NULL OR id > $1::uuid) ORDER BY id LIMIT ${inboundBatchSize}`, [cursor])
   const counts = { checked: page.rows.length, deleted: 0, protected: 0 }
   if (!page.rows.length) return { ...counts, cursor: null }
   const actor = (await local.query("SELECT id FROM aa_local.profiles WHERE is_active AND role IN ('owner', 'veterinarian') ORDER BY id LIMIT 1")).rows[0]?.id
@@ -517,7 +560,7 @@ export async function receiveDeletedBatch(local, remote, table, cursor = null) {
       const history = operations.rows[0]
       const clean = !history.pending && (String(history.confirmed_version) === String(row.row_version)
         || row.remote_base_version !== null && String(row.remote_base_version) === String(row.row_version))
-      if (!clean) { counts.protected++; await local.query('ROLLBACK'); continue }
+      if (!clean) { counts.protected++; await local.query('ROLLBACK'); await rememberInboundRetry(local, table, id); continue }
       if (table === 'clinical_records' || table === 'pets') {
         const children = await local.query(table === 'clinical_records'
           ? `SELECT EXISTS (SELECT 1 FROM aa_local.clinical_files WHERE clinical_record_id = $1)
@@ -528,7 +571,7 @@ export async function receiveDeletedBatch(local, remote, table, cursor = null) {
             OR EXISTS (SELECT 1 FROM aa_local.allergies WHERE pet_id = $1)
             OR EXISTS (SELECT 1 FROM aa_local.pet_notes WHERE pet_id = $1)
             OR EXISTS (SELECT 1 FROM aa_local.weight_records WHERE pet_id = $1) AS linked`, [id])
-        if (children.rows[0].linked) { counts.protected++; await local.query('ROLLBACK'); continue }
+        if (children.rows[0].linked) { counts.protected++; await local.query('ROLLBACK'); await rememberInboundRetry(local, table, id); continue }
       }
       // Recheck under the row lock so a concurrent local edit cannot be erased.
       await remote.query('BEGIN READ ONLY')
@@ -550,5 +593,5 @@ export async function receiveDeletedBatch(local, remote, table, cursor = null) {
       throw error
     }
   }
-  return { ...counts, cursor: page.rows.length === 50 ? page.rows.at(-1).id : null }
+  return { ...counts, cursor: !ids && page.rows.length === inboundBatchSize ? page.rows.at(-1).id : null }
 }
