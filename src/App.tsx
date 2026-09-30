@@ -19,12 +19,11 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
-import { supabase } from './lib/supabase'
 import { clearLocalSession, localFileUrl } from './lib/localFiles'
 import { currentLocalUser, localLogin, type LocalUser } from './lib/localAuth'
 import { vaccineOptions } from './lib/vaccines'
 import type { DetailedPet } from './components/PetDetails'
-import { localData } from './lib/localApi'
+import { localData, localWrite } from './lib/localApi'
 const PetDetails = lazy(() => import('./components/PetDetails').then((module) => ({ default: module.PetDetails })))
 const environmentLabel = import.meta.env.MODE === 'production' ? 'PRODUCCIÓN' : 'PRUEBAS'
 
@@ -357,19 +356,6 @@ function PetForm({ onClose, onSaved }: { onClose: () => void; onSaved: (petId: s
   )
 }
 
-async function functionErrorMessage(error: unknown, fallback: string) {
-  if (error && typeof error === 'object' && 'context' in error) {
-    const context = (error as { context?: Response }).context
-    try {
-      const body = await context?.clone().json() as { error?: string }
-      if (body?.error) return body.error
-    } catch {
-      // The fallback below is intentionally user-friendly when the response has no JSON body.
-    }
-  }
-  return fallback
-}
-
 function CreateUserForm({ onClose, onCreated }: { onClose: () => void; onCreated: () => Promise<void> }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -391,23 +377,19 @@ function CreateUserForm({ onClose, onCreated }: { onClose: () => void; onCreated
       setSaving(false)
       return
     }
-    const { error: invokeError } = await supabase.functions.invoke('manage-users', {
-      body: {
+    try {
+      await localWrite('users', 'POST', {
         displayName: String(data.get('display_name') || '').trim(),
         email: String(data.get('email') || '').trim(),
         role: String(data.get('role') || ''),
         password,
-      },
-    })
-
-    if (invokeError) {
-      setError(await functionErrorMessage(invokeError, 'No fue posible crear el acceso. Intenta de nuevo.'))
+      })
+      await onCreated()
+      onClose()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No fue posible crear el acceso.')
       setSaving(false)
-      return
     }
-
-    await onCreated()
-    onClose()
   }
 
   return (
@@ -423,7 +405,7 @@ function CreateUserForm({ onClose, onCreated }: { onClose: () => void; onCreated
       </label>
       <label>Contraseña<input name="password" type="password" minLength={10} autoComplete="new-password" required /></label>
       <label>Confirmar contraseña<input name="confirmation" type="password" minLength={10} autoComplete="new-password" required /></label>
-      <p className="form-note span-2"><ShieldCheck size={17} /> Mínimo 10 caracteres, con mayúscula, minúscula y número. La contraseña no se guarda en esta aplicación.</p>
+      <p className="form-note span-2"><ShieldCheck size={17} /> Mínimo 10 caracteres, con mayúscula, minúscula y número. Solo se guarda una huella segura en PostgreSQL local.</p>
       <p className="form-note span-2"><ShieldCheck size={17} /> Por seguridad, desde aquí no se puede crear otro usuario dueño.</p>
       {error && <p className="form-error span-2" role="alert">{error}</p>}
       <div className="form-actions span-2">
@@ -443,27 +425,22 @@ function DeleteUserForm({ user, onClose, onDeleted }: { user: Profile; onClose: 
     setDeleting(true)
     setError('')
 
-    const { error: invokeError } = await supabase.functions.invoke('manage-users', {
-      method: 'DELETE',
-      body: { userId: user.id },
-    })
-
-    if (invokeError) {
-      setError(await functionErrorMessage(invokeError, 'No fue posible eliminar el usuario. Intenta de nuevo.'))
+    try {
+      await localWrite(`users/${user.id}`, 'DELETE', {})
+      await onDeleted()
+      onClose()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No fue posible desactivar el usuario.')
       setDeleting(false)
-      return
     }
-
-    await onDeleted()
-    onClose()
   }
 
   return (
     <form className="delete-confirm" onSubmit={submit}>
       <span className="delete-confirm-icon"><Trash2 size={26} /></span>
       <div>
-        <h3>¿Eliminar a {user.display_name}?</h3>
-        <p>La cuenta y su acceso se eliminarán definitivamente de Supabase.</p>
+        <h3>¿Desactivar a {user.display_name}?</h3>
+        <p>Se desactivará su acceso local. No podrá iniciar sesión.</p>
       </div>
       <div className="retention-note">
         <ShieldCheck size={19} />
@@ -472,7 +449,7 @@ function DeleteUserForm({ user, onClose, onDeleted }: { user: Profile; onClose: 
       {error && <p className="form-error" role="alert">{error}</p>}
       <div className="form-actions">
         <button type="button" className="button secondary" onClick={onClose}>Cancelar</button>
-        <button type="submit" className="button danger" disabled={deleting}>{deleting ? 'Eliminando…' : 'Eliminar usuario'}</button>
+        <button type="submit" className="button danger" disabled={deleting}>{deleting ? 'Desactivando…' : 'Desactivar usuario'}</button>
       </div>
     </form>
   )
@@ -531,27 +508,18 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
   useEffect(() => {
     if (view !== 'users' || profile?.role !== 'owner') return
     setUsersError('')
-    if (!session.user.online) {
-      setProfiles([])
-      setUsersError('Para administrar usuarios, cierra sesión e ingresa con internet.')
-      return
-    }
     let cancelled = false
-    void supabase.from('profiles').select('id, display_name, role, is_active, created_at')
-      .order('created_at', { ascending: true }).then(({ data, error: usersError }) => {
+    void localData<Profile[]>('profiles').then((data) => {
         if (cancelled) return
-        if (usersError) {
-          setProfiles([])
-          setUsersError('La administración de usuarios requiere una sesión con internet.')
-        } else setProfiles(data as Profile[])
+        setProfiles(data)
       }, () => {
         if (!cancelled) {
           setProfiles([])
-          setUsersError('No fue posible cargar los usuarios. Revisa la conexión e inténtalo de nuevo.')
+          setUsersError('No fue posible cargar los usuarios locales.')
         }
       })
     return () => { cancelled = true }
-  }, [view, profile?.role, loading, session.user.online])
+  }, [view, profile?.role, loading])
 
   useEffect(() => {
     try {
@@ -697,10 +665,10 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
 
           {view === 'users' && profile.role === 'owner' && (
             <section className="panel page-panel">
-              <div className="page-actions"><div><p className="eyebrow">Administración</p><h2>Usuarios y roles</h2><p className="muted">Solo el dueño puede crear o eliminar accesos.</p></div><button className="button primary" disabled={!session.user.online} onClick={() => { setNotice(''); setModal('create-user') }}><Plus size={18} /> Crear acceso</button></div>
+              <div className="page-actions"><div><p className="eyebrow">Administración</p><h2>Usuarios y roles</h2><p className="muted">Solo el dueño puede crear o desactivar accesos.</p></div><button className="button primary" onClick={() => { setNotice(''); setModal('create-user') }}><Plus size={18} /> Crear acceso</button></div>
               {usersError && <div className="alert error" role="alert"><span>{usersError}</span></div>}
-              <div className="alert"><ShieldCheck size={18} /><span>Las cuentas pueden tener el rol Veterinario o Recepción. Al eliminarlas, su historial permanece.</span></div>
-              <div className="table-wrap responsive-table"><table><thead><tr><th>Usuario</th><th>Rol</th><th>Estado</th><th>Registro</th><th className="actions-column">Acciones</th></tr></thead><tbody>{profiles.map((user) => <tr key={user.id}><td data-label="Usuario"><div className="name-cell"><span className="avatar table-avatar">{initials(user.display_name)}</span><strong>{user.display_name}</strong></div></td><td data-label="Rol">{roleLabels[user.role]}</td><td data-label="Estado"><span className={`status ${user.is_active ? 'active' : 'inactive'}`}>{user.is_active ? 'Activo' : 'Inactivo'}</span></td><td data-label="Registro">{formatDate(user.created_at)}</td><td className="actions-column" data-label="Acciones">{user.role === 'owner' ? <span className="muted">Protegido</span> : <button className="icon-button danger-icon" onClick={() => { setNotice(''); setUserToDelete(user) }} aria-label={`Eliminar a ${user.display_name}`} title="Eliminar usuario"><Trash2 size={17} /></button>}</td></tr>)}</tbody></table></div>
+              <div className="alert"><ShieldCheck size={18} /><span>Las cuentas pueden tener el rol Veterinario o Recepción. Al desactivarlas, su historial permanece.</span></div>
+              <div className="table-wrap responsive-table"><table><thead><tr><th>Usuario</th><th>Rol</th><th>Estado</th><th>Registro</th><th className="actions-column">Acciones</th></tr></thead><tbody>{profiles.map((user) => <tr key={user.id}><td data-label="Usuario"><div className="name-cell"><span className="avatar table-avatar">{initials(user.display_name)}</span><strong>{user.display_name}</strong></div></td><td data-label="Rol">{roleLabels[user.role]}</td><td data-label="Estado"><span className={`status ${user.is_active ? 'active' : 'inactive'}`}>{user.is_active ? 'Activo' : 'Inactivo'}</span></td><td data-label="Registro">{formatDate(user.created_at)}</td><td className="actions-column" data-label="Acciones">{user.role === 'owner' ? <span className="muted">Protegido</span> : user.is_active ? <button className="icon-button danger-icon" onClick={() => { setNotice(''); setUserToDelete(user) }} aria-label={`Desactivar a ${user.display_name}`} title="Desactivar usuario"><Trash2 size={17} /></button> : <span className="muted">Sin acceso</span>}</td></tr>)}</tbody></table></div>
             </section>
           )}
         </div>
@@ -708,7 +676,7 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
 
       {modal === 'pet' && <Modal title="Registrar mascota" onClose={() => setModal(null)}><PetForm onClose={() => setModal(null)} onSaved={async (petId) => { await loadData(); setView('pets'); setSearch(''); setSearchResults(null); setSelectedPetId(petId); setNotice('Mascota, tutor y vacunas registrados.') }} /></Modal>}
       {modal === 'create-user' && <Modal title="Crear acceso" onClose={() => setModal(null)}><CreateUserForm onClose={() => setModal(null)} onCreated={async () => { await loadData(); setNotice('Acceso creado y validado. La persona ya puede iniciar sesión con el correo y la contraseña definidos.') }} /></Modal>}
-      {userToDelete && <Modal title="Eliminar usuario" onClose={() => setUserToDelete(null)}><DeleteUserForm user={userToDelete} onClose={() => setUserToDelete(null)} onDeleted={async () => { await loadData(); setNotice('Usuario eliminado. Sus acciones, expedientes y archivos se conservaron.') }} /></Modal>}
+      {userToDelete && <Modal title="Desactivar usuario" onClose={() => setUserToDelete(null)}><DeleteUserForm user={userToDelete} onClose={() => setUserToDelete(null)} onDeleted={async () => { await loadData(); setNotice('Usuario desactivado. Sus acciones, expedientes y archivos se conservaron.') }} /></Modal>}
     </div>
   )
 }
@@ -735,8 +703,7 @@ export default function App() {
     await clearLocalSession()
     setUser(null)
     setLocalError('')
-    if (user?.online) void supabase.auth.signOut({ scope: 'local' })
-  }, [user?.online])
+  }, [])
 
   if (!ready) return <div className="app-loader"><span className="loader" /><p>Preparando acceso seguro…</p></div>
   if (localError) {

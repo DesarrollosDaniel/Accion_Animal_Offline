@@ -214,11 +214,11 @@ export async function receiveProfiles(local, remote) {
       FROM jsonb_to_recordset($1::jsonb) AS p(id uuid, display_name text, role text, is_active boolean, created_at timestamptz, updated_at timestamptz)
       ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name, role = EXCLUDED.role,
         is_active = EXCLUDED.is_active, updated_at = EXCLUDED.updated_at
-      WHERE (profiles.display_name, profiles.role, profiles.is_active) IS DISTINCT FROM
+      WHERE NOT profiles.local_managed AND (profiles.display_name, profiles.role, profiles.is_active) IS DISTINCT FROM
         (EXCLUDED.display_name, EXCLUDED.role, EXCLUDED.is_active)`, [JSON.stringify(rows)])
     // Preserve clinical foreign keys when the cloud profile has been deleted.
-    await local.query('UPDATE aa_local.profiles SET is_active = false WHERE NOT (id = ANY($1::uuid[])) AND is_active', [ids])
-    await local.query('DELETE FROM aa_local.login_credentials c USING aa_local.profiles p WHERE c.user_id = p.id AND NOT p.is_active')
+    await local.query('UPDATE aa_local.profiles SET is_active = false WHERE NOT local_managed AND NOT (id = ANY($1::uuid[])) AND is_active', [ids])
+    await local.query('DELETE FROM aa_local.login_credentials c USING aa_local.profiles p WHERE c.user_id = p.id AND NOT p.is_active AND NOT p.local_managed')
     await local.query("UPDATE aa_local.sync_state SET last_attempt_at = now(), last_success_at = now(), last_error = NULL, updated_at = now() WHERE stream = 'profiles_inbound'")
     await local.query('COMMIT')
     return { profiles: rows.length }

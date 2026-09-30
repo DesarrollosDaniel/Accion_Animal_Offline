@@ -154,6 +154,8 @@ test('recepción de perfiles acepta dos owners y revoca credenciales sin borrar 
   assert.equal(calls.at(-1).sql, 'COMMIT')
   assert.equal(calls.some(({ sql }) => sql.includes("SET role = 'reception'")), false)
   assert.ok(calls.some(({ sql }) => sql.startsWith('DELETE FROM aa_local.login_credentials')))
+  assert.ok(calls.some(({ sql }) => sql.includes('NOT profiles.local_managed')))
+  assert.ok(calls.some(({ sql }) => sql.includes('WHERE NOT local_managed AND NOT (id = ANY')))
   assert.ok(!calls.some(({ sql }) => sql.startsWith('DELETE FROM aa_local.profiles')))
   assert.deepEqual(calls.find(({ sql }) => sql.includes('ANY($1')).values, [[op.actor_id, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa']])
   calls.length = 0

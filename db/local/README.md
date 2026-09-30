@@ -695,7 +695,7 @@ permanece fijado al proyecto de PRUEBAS; para producción usar únicamente
 
 `.env.production.local` contiene la URL y la clave publicable copiadas del
 proyecto original de producción, junto con `AA_DB_NAME=accion_animal_produ` y
-`AA_STORAGE_ROOT=uploaded/production`. El archivo está excluido de Git. La
+`AA_STORAGE_ROOT=uploaded`. El archivo está excluido de Git. La
 compilación de pruebas sigue usando `.env.local` y `accion_animal_dev`.
 
 En la misma PowerShell, cargar la contraseña de `aa_local_app` y arrancar:
@@ -754,8 +754,11 @@ node --env-file=.env.production.local scripts/sync-production.mjs --check
 ```
 
 `scripts/sync-production.mjs --check` verifica la cuenta limitada y muestra
-las operaciones locales que se enviarían. `--once` procesa hasta 50 operaciones
-pendientes y un lote de 500 registros por tabla; `--watch` repite el ciclo. Solo las
+las operaciones locales que se enviarían. En su primera ejecución, `--once`
+recorre la carga inicial remota en lotes de 500 registros por tabla hasta
+terminarla; en ejecuciones posteriores procesa una pasada de hasta 50
+operaciones pendientes.
+`--watch` repite el ciclo. Solo las
 operaciones explícitas de `aa_local.sync_operations` pueden escribir o eliminar
 en Supabase. Una fila ausente en la copia local no genera una eliminación
 remota. La recepción remota modifica únicamente PostgreSQL local y protege

@@ -1,7 +1,11 @@
 param(
   [Parameter(Mandatory = $true)][string]$Destination,
   [Parameter(Mandatory = $true)][string]$StorageRoot,
-  [string]$PgBin
+  [string]$PgBin,
+  [ValidateSet('accion_animal_dev', 'accion_animal_produ')][string]$Database = 'accion_animal_dev',
+  [string]$DbHost = '127.0.0.1',
+  [ValidateRange(1, 65535)][int]$DbPort = 5432,
+  [string]$DbUser = 'postgres'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,12 +19,12 @@ $dumpTool = if ($PgBin) { Join-Path $PgBin 'pg_dump.exe' } else { (Get-Command p
 $restoreTool = if ($PgBin) { Join-Path $PgBin 'pg_restore.exe' } else { (Get-Command pg_restore.exe).Source }
 $folder = Join-Path $target ('AccionAnimal-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 New-Item -ItemType Directory -Path $folder -ErrorAction Stop | Out-Null
-$dump = Join-Path $folder 'accion_animal_dev.dump'
+$dump = Join-Path $folder ($Database + '.dump')
 $files = Join-Path $folder 'uploaded'
 
 try {
-  $env:PGPASSWORD = [System.Net.NetworkCredential]::new('', (Read-Host 'Contraseña de postgres LOCAL para respaldo' -AsSecureString)).Password
-  & $dumpTool -w -h 127.0.0.1 -p 5432 -U postgres -d accion_animal_dev -Fc -f $dump
+  $env:PGPASSWORD = [System.Net.NetworkCredential]::new('', (Read-Host "Contraseña LOCAL de $DbUser para respaldo" -AsSecureString)).Password
+  & $dumpTool -w -h $DbHost -p $DbPort -U $DbUser -d $Database -Fc -f $dump
   if ($LASTEXITCODE -ne 0) { throw 'Falló pg_dump; el respaldo está incompleto.' }
 } finally {
   Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue

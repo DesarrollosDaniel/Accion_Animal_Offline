@@ -10,6 +10,7 @@ import { assertProductionEnvironment, productionRef } from '../scripts/productio
 import { createLocalPool, handleLocalApi } from './local-api.mjs'
 import { createLocalAuth } from './local-auth.mjs'
 import { LocalApiError, readJsonBody } from './local-writes.mjs'
+import { imageMime } from './image-mime.mjs'
 
 const production = process.env.AA_MODE === 'production'
 if (production) assertProductionEnvironment()
@@ -18,8 +19,6 @@ else assertTestEnvironment()
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const distRoot = path.join(projectRoot, production ? 'dist-production' : 'dist')
 const storageSetting = process.env.AA_STORAGE_ROOT
-const supabaseUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').replace(/\/$/, '')
-const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || ''
 const host = process.env.AA_HOST || '0.0.0.0'
 const port = Number(process.env.AA_PORT || 4173)
 const maxUploadBytes = Number(process.env.AA_MAX_UPLOAD_BYTES || 50 * 1024 * 1024)
@@ -63,7 +62,7 @@ function currentSession(req) {
   const id = parseCookies(req)[cookieName]
   const session = id && sessions.get(id)
   if (!session) return null
-  if (session.expiresAt <= Date.now() || (session.validUntil && session.validUntil <= Date.now())) {
+  if (session.expiresAt <= Date.now()) {
     sessions.delete(id)
     return null
   }
@@ -126,7 +125,7 @@ function canWrite(session) {
 async function serveFile(req, res, filePath, options = {}) {
   const fileStat = await stat(filePath)
   if (!fileStat.isFile()) throw Object.assign(new Error('NOT_FILE'), { code: 'ENOENT' })
-  const type = mimeTypes.get(path.extname(filePath).toLowerCase()) || 'application/octet-stream'
+  const type = mimeTypes.get(path.extname(filePath).toLowerCase()) || await imageMime(filePath) || 'application/octet-stream'
   const headers = {
     'Content-Type': type,
     'Content-Length': fileStat.size,
@@ -147,7 +146,7 @@ async function handleSession(req, res, localPool) {
     if (!session || !localPool) return json(res, 200, { user: null })
     const { rows } = await localPool.query('SELECT role, is_active FROM aa_local.profiles WHERE id = $1', [session.userId])
     if (!rows[0]?.is_active || rows[0].role !== session.role) return json(res, 200, { user: null })
-    return json(res, 200, { user: { id: session.userId, email: session.email, online: false } })
+    return json(res, 200, { user: { id: session.userId, email: session.email } })
   }
   if (!requireSameOrigin(req, res)) return
   if (req.method === 'DELETE') {
@@ -231,7 +230,6 @@ async function serveStatic(req, res, url) {
 async function start() {
   if (!storageSetting) throw new Error('Falta AA_STORAGE_ROOT en .env.local.')
   if (production && !process.env.AA_DB_PASSWORD) throw new Error('Carga AA_DB_PASSWORD para abrir accion_animal_produ.')
-  if (!supabaseUrl || !publishableKey) throw new Error('Faltan la URL o la clave publicable de Supabase.')
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('AA_PORT no es válido.')
   if (!Number.isFinite(maxUploadBytes) || maxUploadBytes < 1) throw new Error('AA_MAX_UPLOAD_BYTES no es válido.')
   await access(path.join(distRoot, 'index.html'), constants.R_OK)
@@ -247,17 +245,21 @@ async function start() {
   if (localPool) {
     try {
       const { rows } = await localPool.query(
-        "SELECT current_user AS db_user, current_database() AS db_name, to_regclass('aa_local.pets') AS pets_table",
+        `SELECT current_user AS db_user, current_database() AS db_name,
+          to_regclass('aa_local.pets') AS pets_table,
+          EXISTS (SELECT 1 FROM aa_local.profiles p JOIN aa_local.login_credentials c ON c.user_id = p.id
+            WHERE p.role = 'owner' AND p.is_active) AS owner_ready`,
       )
       if (rows[0]?.db_user !== 'aa_local_app' || rows[0]?.db_name !== (production ? 'accion_animal_produ' : 'accion_animal_dev') || !rows[0]?.pets_table) {
         throw new Error('La conexión local no usa la cuenta limitada o falta el esquema aa_local.')
       }
+      if (!rows[0].owner_ready) throw new Error('Prepara una credencial local del owner antes de iniciar el servidor.')
     } catch (error) {
       await localPool.end()
       throw error
     }
   }
-  const authenticate = createLocalAuth(localPool, supabaseUrl, publishableKey)
+  const authenticate = createLocalAuth(localPool)
 
   setInterval(() => {
     const now = Date.now()
@@ -302,10 +304,9 @@ async function start() {
         const previous = parseCookies(req)[cookieName]
         if (previous) sessions.delete(previous)
         const id = randomBytes(32).toString('base64url')
-        const expiresAt = Math.min(Date.now() + 8 * 60 * 60 * 1000, user.validUntil)
-        const { cloudSession, ...identity } = user
-        sessions.set(id, { ...identity, expiresAt, verifiedAt: Date.now() })
-        return json(res, 200, { user: { id: user.userId, email: user.email, online: Boolean(cloudSession) }, cloudSession }, {
+        const expiresAt = Date.now() + 8 * 60 * 60 * 1000
+        sessions.set(id, { ...user, expiresAt, verifiedAt: Date.now() })
+        return json(res, 200, { user: { id: user.userId, email: user.email } }, {
           'Set-Cookie': `${cookieName}=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor((expiresAt - Date.now()) / 1000)}${req.socket.encrypted ? '; Secure' : ''}`,
         })
       }
@@ -322,7 +323,6 @@ async function start() {
       if (error?.code === 'ENOENT') return json(res, 404, { error: 'Archivo no encontrado.' })
       if (error?.message === 'INVALID_PATH') return json(res, 400, { error: 'Ruta inválida.' })
       if (error?.message === 'UPLOAD_TOO_LARGE') return json(res, 413, { error: 'El archivo supera el límite configurado.' })
-      if (error?.message === 'SUPABASE_UNAVAILABLE') return json(res, 503, { error: 'No fue posible comunicarse con Supabase.' })
       console.error(error)
       if (!res.headersSent) json(res, 500, { error: 'Error interno del servidor local.' })
       else res.destroy()

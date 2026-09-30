@@ -6,7 +6,7 @@ test('el diagnóstico de producción rechaza un host ajeno antes de consultar', 
   const result = spawnSync(process.execPath, ['scripts/check-production-sync.mjs'], {
     cwd: new URL('..', import.meta.url), encoding: 'utf8',
     env: {
-      ...process.env, AA_MODE: 'production', AA_DB_NAME: 'accion_animal_produ', AA_STORAGE_ROOT: 'uploaded/production',
+      ...process.env, AA_MODE: 'production', AA_DB_NAME: 'accion_animal_produ', AA_STORAGE_ROOT: 'uploaded',
       VITE_SUPABASE_URL: 'https://hvfubwyzarikudisbwfy.supabase.co', VITE_SUPABASE_PUBLISHABLE_KEY: 'ficticia',
       AA_PROD_DB_HOST: 'otro.example.com', AA_PROD_DB_PASSWORD: 'ficticia', AA_DB_PASSWORD: 'ficticia',
     },

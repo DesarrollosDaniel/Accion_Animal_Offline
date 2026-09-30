@@ -160,7 +160,7 @@ try {
       await remote.end().catch(() => {})
     }
     if (mode === '--watch' && !stopping) await setTimeout(inboundCursor?.startsWith('bootstrap:') ? 2000 : 30000)
-  } while (mode === '--watch' && !stopping)
+  } while (!stopping && (mode === '--watch' || (mode === '--once' && inboundCursor?.startsWith('bootstrap:'))))
 } catch (error) {
   console.error(`Fallo en ${stage}. Código: ${syncErrorCode(error)}.`)
   console.error('No se completó la sincronización. Revisa credenciales, certificado, migración y conexión; los cambios locales se conservan.')

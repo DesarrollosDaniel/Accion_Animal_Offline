@@ -7,7 +7,7 @@ export const productionRef = 'hvfubwyzarikudisbwfy'
 export function assertProductionEnvironment(env = process.env) {
   if (env.AA_MODE !== 'production' || env.AA_DB_NAME !== 'accion_animal_produ'
     || env.VITE_SUPABASE_URL !== `https://${productionRef}.supabase.co`
-    || !env.VITE_SUPABASE_PUBLISHABLE_KEY || env.AA_STORAGE_ROOT !== 'uploaded/production') {
+    || !env.VITE_SUPABASE_PUBLISHABLE_KEY || env.AA_STORAGE_ROOT !== 'uploaded') {
     throw new Error('Configuración de PRODUCCIÓN incompleta o cruzada; no se inició.')
   }
 }

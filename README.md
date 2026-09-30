@@ -6,7 +6,7 @@ Esta copia usa exclusivamente el proyecto Supabase `wuenfwsjifwuupfjgubm`. El ar
 
 Antes de operar con la CLI, ejecuta `npm run check:environment`. Para enviar migraciones al proyecto de pruebas, usa `npm run db:push:test`, que realiza la comprobación antes de ejecutar la CLI. Los comandos `npx supabase ...` escritos directamente no pasan por este control. Si falta el enlace, vuelve a enlazar esta carpeta al proyecto de pruebas y comprueba el resultado antes de continuar.
 
-La base PostgreSQL local de desarrollo se llama `accion_animal_dev`. La aplicación de esta etapa sigue conectada al proyecto Supabase de pruebas; crear esa base local no cambia automáticamente la conexión de la aplicación.
+La base PostgreSQL local de desarrollo se llama `accion_animal_dev`. La aplicación usa PostgreSQL y credenciales locales; Supabase no interviene en el ingreso diario.
 
 Esta carpeta contendrá la nueva versión del sistema. El proyecto PHP original se conserva intacto como referencia funcional y de datos.
 
@@ -15,7 +15,7 @@ Esta carpeta contendrá la nueva versión del sistema. El proyecto PHP original 
 Reconstruir el sistema de Acción Animal con:
 
 - aplicación ejecutada únicamente en la red local del consultorio;
-- PostgreSQL y autenticación en Supabase Free;
+- PostgreSQL y autenticación locales;
 - imágenes y documentos conservados en una PC Windows del consultorio;
 - registro, consulta, edición, baja y eliminación de mascotas;
 - expedientes clínicos con fotos y documentos;
@@ -26,7 +26,7 @@ Reconstruir el sistema de Acción Animal con:
 
 ### Aplicación
 
-La aplicación es una SPA construida con React, TypeScript y Vite. Un servidor Node.js pequeño la publica desde la PC de almacenamiento solamente en la red local. La autorización de los datos se aplica en Supabase mediante RLS y el servidor valida cada sesión con Supabase antes de permitir acceso a los archivos.
+La aplicación es una SPA construida con React, TypeScript y Vite. Un servidor Node.js pequeño la publica desde la PC de almacenamiento solamente en la red local. El servidor valida las sesiones y los roles en PostgreSQL local antes de permitir acceso a datos y archivos.
 
 ### Base de datos
 
@@ -49,7 +49,7 @@ Diseño acordado:
 - ruta web local `/uploaded/` asociada a la carpeta indicada por `AA_STORAGE_ROOT`;
 - conservación de nombres y subcarpetas históricas, incluyendo `uploaded/clinicos/...`;
 - la base de datos guardará ruta, nombre original, tipo MIME, tamaño, autor y fecha;
-- los documentos se consultarán únicamente después de validar la sesión de Supabase;
+- los documentos se consultarán únicamente después de validar la sesión local;
 - el servidor local aplicará límites de tamaño, tipos permitidos, permisos por rol y protección contra recorridos de ruta.
 
 Los archivos clínicos permanecerán privados y se consultarán únicamente por usuarios autenticados autorizados.
@@ -58,8 +58,7 @@ Los archivos clínicos permanecerán privados y se consultarán únicamente por 
 
 - acceso mediante correo electrónico y contraseña;
 - tres roles: dueño, veterinaria/o y recepción;
-- existirá un único usuario con rol `owner`;
-- solo el dueño podrá crear y eliminar accesos, definir sus credenciales y asignar los roles de veterinaria/o o recepción;
+- solo un usuario con rol `owner` podrá crear y desactivar accesos de veterinaria/o o recepción;
 - el registro público de cuentas permanecerá deshabilitado;
 - todos los usuarios autenticados pueden consultar todas las mascotas y expedientes;
 - recepción no puede registrar y editar mascotas, incluyendo el nombre y teléfono del tutor en cada registro;
@@ -69,7 +68,7 @@ Los archivos clínicos permanecerán privados y se consultarán únicamente por 
 - todas las tablas expuestas tendrán RLS y políticas explícitas;
 - ninguna clave secreta o `service_role` formará parte de la aplicación publicada.
 
-La administración de cuentas se realiza mediante la Supabase Edge Function autenticada `manage-users`. Esta comprueba en el servidor que quien realiza la solicitud sea el dueño antes de usar la API administrativa de Auth. La clave secreta permanece únicamente en el entorno seguro de Supabase. Desde la sección **Usuarios** el dueño define nombre, correo, contraseña y rol; Supabase valida y activa la cuenta inmediatamente, sin registro público ni correo de invitación. La contraseña nunca se devuelve ni se guarda en la aplicación. El dueño también puede eliminar cuentas de Veterinaria o Recepción, pero no su propia cuenta ni otra cuenta dueña. Al eliminar, desaparecen el acceso de Auth y el perfil; las mascotas, expedientes, notas, eventos de auditoría y archivos creados por esa persona se conservan.
+La administración de cuentas se realiza en el servidor local, incluso sin Internet. Desde **Usuarios**, `owner` define nombre, correo, contraseña y rol. Solo se guarda un hash scrypt con sal en PostgreSQL. La cuenta queda activa inmediatamente y no vence a los siete días. Al desactivar a alguien se revoca su acceso local y se conserva su historial. Tras aplicar `009_local_users.sql`, si aún no hay credenciales locales de un dueño se preparan una sola vez con `scripts/bootstrap-local-owner.mjs`. El sincronizador `--once` sigue siendo bidireccional y no sirve como respaldo de estas cuentas locales; para copias se requiere un respaldo PostgreSQL junto con `uploaded/`.
 
 ## Diseño visual acordado
 
@@ -132,4 +131,4 @@ Antes de implementar se deben confirmar:
 
 ## Estado
 
-Arquitectura inicial, permisos y módulos documentados. El esquema de Supabase está definido mediante migraciones versionadas. La aplicación React/Vite incluye acceso, panel, búsqueda, alta de mascotas y administración de usuarios. El servidor local publica la aplicación, valida sesiones contra Supabase y sirve las rutas históricas protegidas desde el disco de la PC configurada. El respaldo `accion_animal_db.sql` y la carpeta histórica fueron localizados y analizados; la importación final de los datos aún está pendiente.
+La aplicación React/Vite consulta PostgreSQL local para acceso, mascotas y expedientes. El servidor local valida sesiones y protege los archivos en `uploaded/`. La migración `009_local_users.sql` habilita usuarios locales sin vencimiento de siete días; debe aplicarse en cada base antes de usar esta versión. La importación histórica y el despliegue en la PC definitiva se verifican por separado.

@@ -1,20 +1,17 @@
-import { supabase } from './supabase'
-
-export type LocalUser = { id: string; email?: string; online: boolean }
+export type LocalUser = { id: string; email?: string }
 
 async function authRequest(path: string, body: unknown) {
   const response = await fetch(path, {
     method: 'POST', credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   })
-  const result = await response.json() as { error?: string; user: LocalUser; cloudSession?: { access_token: string; refresh_token: string } }
+  const result = await response.json() as { error?: string; user: LocalUser }
   if (!response.ok) throw new Error(result.error || 'No fue posible verificar el acceso.')
   return result
 }
 
 export async function localLogin(email: string, password: string) {
   const result = await authRequest('/api/local-auth', { email, password })
-  if (result.cloudSession) await supabase.auth.setSession(result.cloudSession)
   return result.user
 }
 

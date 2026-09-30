@@ -4,11 +4,11 @@ import { assertProductionEnvironment, productionRef } from './production-environ
 
 test('producción exige URL, base local y almacenamiento del mismo entorno', () => {
   const env = {
-    AA_MODE: 'production', AA_DB_NAME: 'accion_animal_produ', AA_STORAGE_ROOT: 'uploaded/production',
+    AA_MODE: 'production', AA_DB_NAME: 'accion_animal_produ', AA_STORAGE_ROOT: 'uploaded',
     VITE_SUPABASE_URL: `https://${productionRef}.supabase.co`, VITE_SUPABASE_PUBLISHABLE_KEY: 'clave-ficticia',
   }
   assert.doesNotThrow(() => assertProductionEnvironment(env))
-  for (const [key, value] of [['AA_DB_NAME', 'accion_animal_dev'], ['VITE_SUPABASE_URL', 'https://wuenfwsjifwuupfjgubm.supabase.co'], ['AA_STORAGE_ROOT', 'uploaded']]) {
+  for (const [key, value] of [['AA_DB_NAME', 'accion_animal_dev'], ['VITE_SUPABASE_URL', 'https://wuenfwsjifwuupfjgubm.supabase.co'], ['AA_STORAGE_ROOT', 'uploaded/production'], ['AA_STORAGE_ROOT', 'uploaded/test']]) {
     assert.throws(() => assertProductionEnvironment({ ...env, [key]: value }), /Configuración de PRODUCCIÓN/)
   }
 })

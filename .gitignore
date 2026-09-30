@@ -2,6 +2,8 @@
 /uploaded/
 /legacy-data/
 /*.sql
+/Instalacion/
+/prod-ca-2021.crt
 
 # Configuración local y secretos
 .env

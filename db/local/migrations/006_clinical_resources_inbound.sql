@@ -1,8 +1,8 @@
 begin;
 do $$
 begin
-  if current_database() <> 'accion_animal_dev' then
-    raise exception 'Esta migración solo corresponde a accion_animal_dev';
+  if current_database() not in ('accion_animal_dev', 'accion_animal_produ') then
+    raise exception 'Esta migración solo corresponde a una base local de Accion Animal';
   end if;
 end $$;
 -- Same protected cloud baseline as pets and clinical records.

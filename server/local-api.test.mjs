@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createLocalPool, handleLocalApi, saveVerifiedProfile } from './local-api.mjs'
+import { createLocalPool, createLocalUser, deactivateLocalUser, handleLocalApi } from './local-api.mjs'
+import { passwordMatches } from './local-auth.mjs'
 
 const userId = '11111111-1111-4111-8111-111111111111'
 const petId = '22222222-2222-4222-8222-222222222222'
@@ -140,11 +141,38 @@ test('no conecta si falta la contraseña y limita usuario, host y nombre de base
   await productionPool.end()
 })
 
-test('guarda el perfil verificado usando parámetros SQL', async () => {
+test('solo owner puede abrir la creación local y exige el mismo origen', async () => {
+  const other = await request('/api/local/users', { method: 'POST', origin: 'http://localhost' })
+  assert.equal(other.res.status, 403)
+  const owner = await request('/api/local/users', { method: 'POST', session: { userId, role: 'owner' },
+    rows: { profile: [{ role: 'owner', is_active: true }] }, origin: 'http://otro' })
+  assert.equal(owner.res.status, 403)
+})
+
+test('owner crea una cuenta local atómica con hash y desactiva sin borrar historial', async () => {
   const calls = []
-  await saveVerifiedProfile({ query: async (...args) => calls.push(args) }, {
-    userId, displayName: 'Veterinaria', role: 'veterinarian',
-  })
-  assert.match(calls[0][0], /ON CONFLICT \(id\) DO UPDATE/)
-  assert.deepEqual(calls[0][1], [userId, 'Veterinaria', 'veterinarian'])
+  const client = {
+    async query(sql, values) {
+      calls.push({ sql, values })
+      if (sql.startsWith('SELECT 1')) return { rows: [] }
+      if (sql.startsWith('UPDATE aa_local.profiles')) return { rows: [{ id: userId }] }
+      return { rows: [] }
+    },
+    release() { calls.push({ sql: 'release' }) },
+  }
+  const pool = { connect: async () => client }
+  const created = await createLocalUser(pool, { displayName: '  Persona  ', email: '  PERSONA@example.test ',
+    role: 'reception', password: 'ClaveSegura123' })
+  assert.match(created.id, /^[0-9a-f-]{36}$/)
+  const insert = calls.find(({ sql }) => sql.startsWith('INSERT INTO aa_local.login_credentials'))
+  assert.equal(insert.values.includes('ClaveSegura123'), false)
+  assert.equal(await passwordMatches('ClaveSegura123', { password_salt: insert.values[2], password_hash: insert.values[3] }), true)
+  assert.ok(calls.some(({ sql }) => sql.startsWith('INSERT INTO aa_local.profiles')))
+  assert.ok(calls.some(({ sql }) => sql === 'COMMIT'))
+  calls.length = 0
+  await deactivateLocalUser(pool, userId)
+  assert.ok(calls.some(({ sql }) => sql.startsWith('UPDATE aa_local.profiles SET is_active = false')))
+  assert.ok(calls.some(({ sql }) => sql.startsWith('DELETE FROM aa_local.login_credentials')))
+  assert.ok(!calls.some(({ sql }) => sql.startsWith('DELETE FROM aa_local.profiles')))
+  await assert.rejects(createLocalUser(pool, { displayName: 'X', email: 'bad', role: 'owner', password: 'short' }), { status: 400 })
 })

@@ -2,8 +2,8 @@ begin;
 
 do $$
 begin
-  if current_database() <> 'accion_animal_dev' then
-    raise exception 'Use accion_animal_dev';
+  if current_database() not in ('accion_animal_dev', 'accion_animal_produ') then
+    raise exception 'Use an Accion Animal local database';
   end if;
 end;
 $$;
