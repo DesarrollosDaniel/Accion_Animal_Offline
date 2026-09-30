@@ -1,0 +1,22 @@
+{
+  "date": "2026-09-30",
+  "url": "http://localhost:4174/",
+  "version": "Accion_Animal_Offline production",
+  "measurement": "Navigation to rendered workspace with an existing authenticated session; includes browser and actual local HTTP requests",
+  "samplesMs": [4791.9, 4469.3, 4494.4, 4525.6, 4403.3],
+  "medianMs": 4494.4,
+  "requestsPerLoad": 80,
+  "sequentialPetRequestsPerLoad": 77,
+  "passwordHashSyntheticSamplesMs": [419.04, 405.1, 402.85, 401.59, 401.22],
+  "passwordHashMedianMs": 402.85,
+  "optimized": {
+    "samplesMs": [258.8, 150.5, 117.5, 108, 114.1],
+    "medianMs": 117.5,
+    "requestsPerLoad": 6,
+    "petRequestsPerLoad": 3,
+    "timeReductionPercent": 97.39,
+    "requestReductionPercent": 92.5,
+    "manualChecks": ["200 active rows", "33 inactive rows", "search finds older pets outside initial rows", "older selected pet restored after reload without errors"]
+  },
+  "notes": "Both measurements use the actual local server and the same authenticated browser. Baseline was recorded before optimization; optimized measurements followed the production build. This measures restoring an existing session, not entering a password. No database changes. Password hash timing uses synthetic inputs. Temporary diagnostic HTML and scripts were removed from the served directory; browser-load-meter.js preserves the timing instrumentation."
+}

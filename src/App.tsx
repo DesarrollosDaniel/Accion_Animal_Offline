@@ -25,7 +25,7 @@ import { vaccineOptions } from './lib/vaccines'
 import type { DetailedPet } from './components/PetDetails'
 import { localData, localWrite } from './lib/localApi'
 const PetDetails = lazy(() => import('./components/PetDetails').then((module) => ({ default: module.PetDetails })))
-const environmentLabel = import.meta.env.MODE === 'production' ? 'PRODUCCIÓN' : 'PRUEBAS'
+const environmentLabel = import.meta.env.MODE === 'production' ? null : 'PRUEBAS'
 
 type Role = 'owner' | 'veterinarian' | 'reception'
 type View = 'dashboard' | 'pets' | 'inactive-pets' | 'users'
@@ -42,14 +42,9 @@ type Pet = DetailedPet
 type LocalPet = Pet & { row_version: string }
 
 async function localPets(): Promise<LocalPet[]> {
-  const pets: LocalPet[] = []
-  // ponytail: carga hasta 50 000 mascotas; paginar en el servidor si la apertura se vuelve lenta.
-  for (let offset = 0; offset <= 50000; offset += 200) {
-    const page = await localData<LocalPet[]>(`pets?status=all&limit=200&offset=${offset}`)
-    pets.push(...page)
-    if (page.length < 200) return pets
-  }
-  throw new Error('La lista local supera el límite de 50 000 mascotas. Usa la búsqueda.')
+  const pages = await Promise.all(['active', 'inactive', 'deceased'].map((status) =>
+    localData<LocalPet[]>(`pets?status=${status}&limit=200`)))
+  return pages.flat().sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id))
 }
 
 const roleLabels: Record<Role, string> = {
@@ -116,14 +111,14 @@ function Login({ onLogin }: { onLogin: (user: LocalUser) => void }) {
         <div className="login-brand-inner">
           <img src="./logo.jpg" alt="Logotipo de Acción Animal" className="login-logo" />
           <h1>Acción Animal</h1>
-          <p className="environment-badge">ENTORNO DE {environmentLabel}</p>
+          {environmentLabel && <p className="environment-badge">ENTORNO DE {environmentLabel}</p>}
           <p className="login-copy">Sistema de gestión</p>
         </div>
       </section>
       <section className="login-panel">
         <form className="login-card" onSubmit={submit}>
           <div className="mobile-logo"><img src="./logo.jpg" alt="Acción Animal" /></div>
-          <p className="environment-badge environment-badge-dark">ENTORNO DE {environmentLabel}</p>
+          {environmentLabel && <p className="environment-badge environment-badge-dark">ENTORNO DE {environmentLabel}</p>}
           <p className="eyebrow">Bienvenido</p>
           <h2>Inicia sesión</h2>
           <p className="muted">Usa la cuenta proporcionada por el administrador.</p>
@@ -165,7 +160,7 @@ function Login({ onLogin }: { onLogin: (user: LocalUser) => void }) {
             {loading ? 'Ingresando…' : 'Ingresar'}
             {!loading && <ChevronRight size={18} />}
           </button>
-          <p className="login-help">El primer acceso requiere internet. Después podrás ingresar sin conexión durante siete días.</p>
+          <p className="login-help">Puedes ingresar sin conexión a internet con la cuenta proporcionada por el administrador.</p>
         </form>
       </section>
     </main>
@@ -506,6 +501,17 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
   useEffect(() => { void loadData() }, [loadData])
 
   useEffect(() => {
+    if (loading || !selectedPetId || pets.some((pet) => pet.id === selectedPetId) || searchResults?.some((pet) => pet.id === selectedPetId)) return
+    const controller = new AbortController()
+    void localData<LocalPet>(`pets/${encodeURIComponent(selectedPetId)}`, { signal: controller.signal }).then((pet) => {
+      if (!controller.signal.aborted) setPets((current) => [...current, pet])
+    }).catch((cause) => {
+      if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'No fue posible cargar la ficha guardada.')
+    })
+    return () => controller.abort()
+  }, [loading, selectedPetId, pets, searchResults])
+
+  useEffect(() => {
     if (view !== 'users' || profile?.role !== 'owner') return
     setUsersError('')
     let cancelled = false
@@ -587,7 +593,7 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
       <aside className={`sidebar ${mobileNav ? 'open' : ''}`}>
         <div className="sidebar-brand">
           <img src="./logo.jpg" alt="Acción Animal" />
-          <div><strong>Acción Animal</strong><span>ENTORNO DE {environmentLabel}</span></div>
+          <div><strong>Acción Animal</strong>{environmentLabel && <span>ENTORNO DE {environmentLabel}</span>}</div>
         </div>
         <nav aria-label="Navegación principal">
           <p className="nav-caption">MENÚ</p>
