@@ -163,6 +163,27 @@ function Login({ onLogin }: { onLogin: (user: LocalUser) => void }) {
           <p className="login-help">Puedes ingresar sin conexión a internet con la cuenta proporcionada por el administrador.</p>
         </form>
       </section>
+      <svg className="login-dog" viewBox="0 0 220 210" aria-hidden="true" focusable="false">
+        <path d="M42 210c3-43 24-69 68-69s65 26 68 69" fill="#c9854f" />
+        <path d="M70 210c3-30 16-48 40-48s37 18 40 48" fill="#f5d8ae" />
+        <path d="M45 67c-8-22-24-31-30-14-7 20 1 65 26 73l23-28z" fill="#96552e" />
+        <path d="M175 67c8-22 24-31 30-14 7 20-1 65-26 73l-23-28z" fill="#96552e" />
+        <path d="M43 90c0-43 27-73 67-73s67 30 67 73v28c0 39-29 66-67 66s-67-27-67-66z" fill="#d99961" />
+        <path d="M88 21c-20 9-34 31-36 55 12-13 24-17 36-19zM132 21c20 9 34 31 36 55-12-13-24-17-36-19z" fill="#e9b582" />
+        <ellipse cx="78" cy="105" rx="7" ry="9" fill="#282d2b" />
+        <ellipse cx="142" cy="105" rx="7" ry="9" fill="#282d2b" />
+        <circle cx="80" cy="102" r="2" fill="white" />
+        <circle cx="144" cy="102" r="2" fill="white" />
+        <path d="M77 130c0-15 14-25 33-25s33 10 33 25v20c0 20-15 35-33 35s-33-15-33-35z" fill="#f8e5c7" />
+        <path d="M96 128c0-5 6-8 14-8s14 3 14 8-7 12-14 12-14-7-14-12z" fill="#4d342d" />
+        <path d="M110 140v10m0 0c-6 8-15 9-22 3m22-3c6 8 15 9 22 3" fill="none" stroke="#6b4435" strokeWidth="3" strokeLinecap="round" />
+        <path d="M100 158c0 13 5 20 10 20s10-7 10-20z" fill="#ed8391" />
+        <path d="M27 201c3-14 15-23 29-21 13 2 21 13 19 26l-48 4z" fill="#e5aa73" />
+        <g className="login-dog-wave">
+          <path d="M165 178c-2-14 4-22 16-27l12-17c4-6 13-2 11 5l-4 10c10-8 18 1 13 9l-16 29c-9 16-21 22-33 14z" fill="#e5aa73" />
+          <path d="M181 159l8 4m1-15 7 5" stroke="#c9854f" strokeWidth="3" strokeLinecap="round" />
+        </g>
+      </svg>
     </main>
   )
 }

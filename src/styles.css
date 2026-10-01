@@ -17,7 +17,7 @@
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 320px; min-height: 100vh; background: #f3f6f4; }
+body { margin: 0; min-width: 0; min-height: 100vh; background: #f3f6f4; }
 button, input, textarea, select { font: inherit; }
 button { cursor: pointer; }
 button, summary, input, textarea, select { touch-action: manipulation; }
@@ -25,7 +25,7 @@ button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus
 h1, h2, h3, p { margin-top: 0; }
 h1, h2, h3 { font-family: 'Manrope', sans-serif; color: var(--ink); }
 
-.login-page { min-height: 100vh; display: grid; grid-template-columns: minmax(390px, 0.95fr) 1.2fr; }
+.login-page { position: relative; min-height: 100vh; display: grid; grid-template-columns: minmax(390px, 0.95fr) 1.2fr; overflow: hidden; }
 .login-brand { position: relative; overflow: hidden; display: flex; align-items: center; padding: 7vw; color: white; background: linear-gradient(145deg, rgba(17, 87, 62, .97), rgba(9, 54, 41, .99)); }
 .login-brand::before, .login-brand::after { content: ''; position: absolute; border-radius: 50%; border: 1px solid rgba(255,255,255,.12); }
 .login-brand::before { width: 440px; height: 440px; right: -260px; top: -120px; }
@@ -54,6 +54,10 @@ textarea { resize: vertical; }
 .login-card label + label { margin-top: 18px; }
 .login-card .button { margin-top: 24px; }
 .login-help { color: var(--muted); text-align: center; font-size: .84rem; margin: 24px 0 0; }
+.login-dog { --dog-hidden: 110%; position: absolute; right: clamp(10px, 3vw, 48px); bottom: 0; width: clamp(120px, 13vw, 190px); height: auto; pointer-events: none; transform: translateY(var(--dog-hidden)); animation: dog-peek 8s ease-in-out infinite; filter: drop-shadow(0 8px 12px rgba(18, 61, 48, .16)); }
+.login-dog-wave { transform-origin: 168px 188px; animation: dog-wave 8s ease-in-out infinite; }
+@keyframes dog-peek { 0%, 8%, 75%, 100% { transform: translateY(var(--dog-hidden)); } 18%, 64% { transform: translateY(0); } }
+@keyframes dog-wave { 0%, 23%, 48%, 100% { transform: rotate(0); } 29%, 39% { transform: rotate(-22deg); } 34%, 44% { transform: rotate(10deg); } }
 .form-error { color: #a32d2d; background: #fff0f0; border: 1px solid #f3cccc; border-radius: 9px; padding: 10px 12px; font-size: .86rem; margin: 15px 0 0; }
 .button { display: inline-flex; justify-content: center; align-items: center; gap: 8px; min-height: 42px; border-radius: 10px; border: 0; padding: 10px 16px; font-weight: 700; transition: transform .15s, background .2s, opacity .2s; }
 .button:hover:not(:disabled) { transform: translateY(-1px); }
@@ -338,6 +342,7 @@ tbody tr:hover { background: #fbfdfc; }
   .login-page { display: block; background: #f7f9f8; }
   .login-brand { display: none; }
   .login-panel { min-height: 100vh; padding: 35px 24px; }
+  .login-dog { display: none; }
   .mobile-logo { display: block; margin-bottom: 35px; }
   .mobile-logo img { width: 84px; height: 84px; object-fit: cover; border-radius: 18px; }
   .topbar { padding-inline: 20px; }
@@ -354,6 +359,8 @@ tbody tr:hover { background: #fbfdfc; }
   .pet-profile-card, .clinical-section { padding: 22px 20px; }
   .observation-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+@media (prefers-reduced-motion: reduce) { .login-dog, .login-dog-wave { animation: none; } .login-dog { transform: none; } }
 
 @media (max-width: 520px) {
   .topbar-user span { display: none; }
