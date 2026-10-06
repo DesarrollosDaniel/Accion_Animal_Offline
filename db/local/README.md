@@ -764,3 +764,6 @@ en Supabase. Una fila ausente en la copia local no genera una eliminación
 remota. La recepción remota modifica únicamente PostgreSQL local y protege
 cambios locales pendientes. Durante el primer recorrido usa pausas de dos
 segundos; después consulta la auditoría cada 30 segundos.
+
+Para iniciarlo automáticamente al encender la PC Windows y esperar a que
+PostgreSQL esté disponible, sigue [ARRANQUE_WATCH_PRODUCCION.md](../../ARRANQUE_WATCH_PRODUCCION.md).
