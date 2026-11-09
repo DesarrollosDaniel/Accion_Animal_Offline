@@ -621,6 +621,8 @@ export function PetDetails({ pet, role, professionalName, onPetChanged, onPetDel
   const [error, setError] = useState('')
   const [showForm, setShowForm] = useState(false)
   const [editingPet, setEditingPet] = useState(false)
+  const [editingPetData, setEditingPetData] = useState<DetailedPet | null>(null)
+  const [loadingPetEdit, setLoadingPetEdit] = useState(false)
   const [editingRecord, setEditingRecord] = useState<ClinicalRecord | null>(null)
   const [loadingEditRecordId, setLoadingEditRecordId] = useState<string | null>(null)
   const [changingStatus, setChangingStatus] = useState(false)
@@ -761,15 +763,37 @@ export function PetDetails({ pet, role, professionalName, onPetChanged, onPetDel
       setLoadingEditRecordId(null)
     }
   }
+  async function editPetProfile() {
+    setError('')
+    setLoadingPetEdit(true)
+    try {
+      const [latestPet, weights, latestVaccinations, latestNotes] = await Promise.all([
+        localData<DetailedPet>(`pets/${pet.id}`),
+        localData<WeightRecord[]>(`pets/${pet.id}/weight-records?limit=1`),
+        localData<Vaccination[]>(`pets/${pet.id}/vaccinations?limit=200`),
+        localData<PetNote[]>(`pets/${pet.id}/pet-notes?limit=1`),
+      ])
+      setEditingPetData(latestPet)
+      setLatestWeight(weights[0] || null)
+      setVaccinations(latestVaccinations)
+      setNote(latestNotes[0] || null)
+      onPetChanged(latestPet)
+      setEditingPet(true)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No fue posible cargar la versión actual de la ficha.')
+    } finally {
+      setLoadingPetEdit(false)
+    }
+  }
   return (
     <div className="pet-details">
-      {editingPet ? <PetEditForm pet={pet} latestWeight={latestWeight} vaccinations={vaccinations} note={note} onSaved={(updatedPet, refresh = true) => { onPetChanged(updatedPet); if (refresh) void loadRecords() }} onCancel={() => setEditingPet(false)} /> : <section className="pet-profile-card">
+      {editingPet ? <PetEditForm pet={editingPetData || pet} latestWeight={latestWeight} vaccinations={vaccinations} note={note} onSaved={(updatedPet, refresh = true) => { onPetChanged(updatedPet); if (refresh) void loadRecords() }} onCancel={() => { setEditingPet(false); setEditingPetData(null) }} /> : <section className="pet-profile-card">
         <div className="pet-photo-control">
           {photoUrl && !photoFailed ? <button type="button" className="pet-photo-large" onClick={() => setPhotoExpanded(true)} aria-label={`Ampliar fotografía de ${pet.name}`} title="Ampliar fotografía"><img src={photoUrl} alt={`Fotografía de ${pet.name}`} onError={() => setPhotoFailed(true)} /></button> : <div className="pet-photo-large"><PawPrint size={42} /></div>}
           {canEdit && <label className="photo-change-button"><Camera size={15} /> {changingPhoto ? 'Cambiando…' : 'Cambiar foto'}<input type="file" accept=".bmp,.gif,.jfif,.jpeg,.jpg,.png,.webp,image/*" disabled={changingPhoto} onChange={(event) => void changePhoto(event)} /></label>}
           {photoMessage && <span className="photo-message" role="status">{photoMessage}</span>}
         </div>
-        <div className="pet-profile-heading"><p className="eyebrow">Ficha completa</p><h3>{pet.name}</h3><span className={`status ${pet.status}`}>{displayStatus(pet.status)}</span>{canEdit && <div className="pet-profile-actions"><details className="action-menu"><summary className="icon-button action-menu-trigger" aria-label={`Acciones de ${pet.name}`} title="Acciones"><MoreHorizontal size={20} /></summary><div className="action-menu-popover" role="menu"><button type="button" role="menuitem" onClick={() => setEditingPet(true)}><Pencil size={15} /> Editar información</button><button type="button" role="menuitem" className={pet.status === 'active' ? 'warning' : ''} disabled={changingStatus} onClick={() => void changeStatus()}>{pet.status === 'active' ? <><span aria-hidden="true">🌈</span> Mandar a decesos</> : <><RotateCcw size={15} /> Reactivar mascota</>}</button><button type="button" role="menuitem" className="destructive" onClick={() => setDeleteTarget({ kind: 'pet' })}><Trash2 size={15} /> Eliminar mascota</button></div></details></div>}</div>
+        <div className="pet-profile-heading"><p className="eyebrow">Ficha completa</p><h3>{pet.name}</h3><span className={`status ${pet.status}`}>{displayStatus(pet.status)}</span>{canEdit && <div className="pet-profile-actions"><details className="action-menu"><summary className="icon-button action-menu-trigger" aria-label={`Acciones de ${pet.name}`} title="Acciones"><MoreHorizontal size={20} /></summary><div className="action-menu-popover" role="menu"><button type="button" role="menuitem" disabled={loadingPetEdit} onClick={() => void editPetProfile()}>{loadingPetEdit ? <><RotateCcw size={15} /> Cargando versión actual…</> : <><Pencil size={15} /> Editar información</>}</button><button type="button" role="menuitem" className={pet.status === 'active' ? 'warning' : ''} disabled={changingStatus || loadingPetEdit} onClick={() => void changeStatus()}>{pet.status === 'active' ? <><span aria-hidden="true">🌈</span> Mandar a decesos</> : <><RotateCcw size={15} /> Reactivar mascota</>}</button><button type="button" role="menuitem" className="destructive" onClick={() => setDeleteTarget({ kind: 'pet' })}><Trash2 size={15} /> Eliminar mascota</button></div></details></div>}</div>
         {note && <div className="pet-alert-note"><Info size={22} /><div><strong>Información clave sobre la mascota o tutor</strong><p>{note.body}</p></div></div>}
         <div className="detail-grid">
           <DetailItem label="Especie" value={valueOrDash(pet.species)} />
