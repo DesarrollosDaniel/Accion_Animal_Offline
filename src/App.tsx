@@ -474,6 +474,48 @@ function DeleteUserForm({ user, onClose, onDeleted }: { user: Profile; onClose: 
   )
 }
 
+function ReactivateUserForm({ user, onClose, onReactivated }: { user: Profile; onClose: () => void; onReactivated: () => Promise<void> }) {
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setSaving(true)
+    setError('')
+    const data = new FormData(event.currentTarget)
+    const password = String(data.get('password') || '')
+    const confirmation = String(data.get('confirmation') || '')
+    if (password !== confirmation) {
+      setError('Las contraseñas no coinciden.')
+      setSaving(false)
+      return
+    }
+    try {
+      await localWrite(`users/${user.id}`, 'PATCH', { email: String(data.get('email') || '').trim(), password })
+      await onReactivated()
+      onClose()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No fue posible reactivar el usuario.')
+      setSaving(false)
+    }
+  }
+
+  return (
+    <form className="form-grid" onSubmit={submit}>
+      <p className="form-intro span-2">Asigna las credenciales para que {user.display_name} pueda volver a iniciar sesión.</p>
+      <label className="span-2">Correo electrónico<input name="email" type="email" required maxLength={254} autoComplete="off" placeholder="nombre@correo.com" /></label>
+      <label>Contraseña<input name="password" type="password" minLength={10} autoComplete="new-password" required /></label>
+      <label>Confirmar contraseña<input name="confirmation" type="password" minLength={10} autoComplete="new-password" required /></label>
+      <p className="form-note span-2"><ShieldCheck size={17} /> Mínimo 10 caracteres, con mayúscula, minúscula y número.</p>
+      {error && <p className="form-error span-2" role="alert">{error}</p>}
+      <div className="form-actions span-2">
+        <button type="button" className="button secondary" onClick={onClose}>Cancelar</button>
+        <button type="submit" className="button primary" disabled={saving}>{saving ? 'Reactivando…' : 'Reactivar acceso'}</button>
+      </div>
+    </form>
+  )
+}
+
 function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSignOut: () => Promise<void> }) {
   const workspaceStorageKey = `accion-animal:workspace:${session.user.id}`
   const restoredWorkspace = useMemo(() => {
@@ -502,6 +544,7 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
   const [mobileNav, setMobileNav] = useState(false)
   const [modal, setModal] = useState<'pet' | 'create-user' | null>(null)
   const [userToDelete, setUserToDelete] = useState<Profile | null>(null)
+  const [userToReactivate, setUserToReactivate] = useState<Profile | null>(null)
   const [selectedPetId, setSelectedPetId] = useState<string | null>(restoredWorkspace.selectedPetId)
 
   const loadData = useCallback(async () => {
@@ -696,10 +739,10 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
 
           {view === 'users' && profile.role === 'owner' && (
             <section className="panel page-panel">
-              <div className="page-actions"><div><p className="eyebrow">Administración</p><h2>Usuarios y roles</h2><p className="muted">Solo el dueño puede crear o desactivar accesos.</p></div><button className="button primary" onClick={() => { setNotice(''); setModal('create-user') }}><Plus size={18} /> Crear acceso</button></div>
+              <div className="page-actions"><div><p className="eyebrow">Administración</p><h2>Usuarios y roles</h2><p className="muted">Solo el dueño puede crear, desactivar o reactivar accesos.</p></div><button className="button primary" onClick={() => { setNotice(''); setModal('create-user') }}><Plus size={18} /> Crear acceso</button></div>
               {usersError && <div className="alert error" role="alert"><span>{usersError}</span></div>}
               <div className="alert"><ShieldCheck size={18} /><span>Las cuentas pueden tener el rol Veterinario o Recepción. Al desactivarlas, su historial permanece.</span></div>
-              <div className="table-wrap responsive-table"><table><thead><tr><th>Usuario</th><th>Rol</th><th>Estado</th><th>Registro</th><th className="actions-column">Acciones</th></tr></thead><tbody>{profiles.map((user) => <tr key={user.id}><td data-label="Usuario"><div className="name-cell"><span className="avatar table-avatar">{initials(user.display_name)}</span><strong>{user.display_name}</strong></div></td><td data-label="Rol">{roleLabels[user.role]}</td><td data-label="Estado"><span className={`status ${user.is_active ? 'active' : 'inactive'}`}>{user.is_active ? 'Activo' : 'Inactivo'}</span></td><td data-label="Registro">{formatDate(user.created_at)}</td><td className="actions-column" data-label="Acciones">{user.role === 'owner' ? <span className="muted">Protegido</span> : user.is_active ? <button className="icon-button danger-icon" onClick={() => { setNotice(''); setUserToDelete(user) }} aria-label={`Desactivar a ${user.display_name}`} title="Desactivar usuario"><Trash2 size={17} /></button> : <span className="muted">Sin acceso</span>}</td></tr>)}</tbody></table></div>
+              <div className="table-wrap responsive-table"><table><thead><tr><th>Usuario</th><th>Rol</th><th>Estado</th><th>Registro</th><th className="actions-column">Acciones</th></tr></thead><tbody>{profiles.map((user) => <tr key={user.id}><td data-label="Usuario"><div className="name-cell"><span className="avatar table-avatar">{initials(user.display_name)}</span><strong>{user.display_name}</strong></div></td><td data-label="Rol">{roleLabels[user.role]}</td><td data-label="Estado"><span className={`status ${user.is_active ? 'active' : 'inactive'}`}>{user.is_active ? 'Activo' : 'Inactivo'}</span></td><td data-label="Registro">{formatDate(user.created_at)}</td><td className="actions-column" data-label="Acciones">{user.role === 'owner' ? <span className="muted">Protegido</span> : user.is_active ? <button className="icon-button danger-icon" onClick={() => { setNotice(''); setUserToDelete(user) }} aria-label={`Desactivar a ${user.display_name}`} title="Desactivar usuario"><Trash2 size={17} /></button> : <button className="text-button" onClick={() => { setNotice(''); setUserToReactivate(user) }}>Reactivar acceso</button>}</td></tr>)}</tbody></table></div>
             </section>
           )}
         </div>
@@ -707,7 +750,8 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
 
       {modal === 'pet' && <Modal title="Registrar mascota" onClose={() => setModal(null)}><PetForm onClose={() => setModal(null)} onSaved={async (petId) => { await loadData(); setView('pets'); setSearch(''); setSearchResults(null); setSelectedPetId(petId); setNotice('Mascota, tutor y vacunas registrados.') }} /></Modal>}
       {modal === 'create-user' && <Modal title="Crear acceso" onClose={() => setModal(null)}><CreateUserForm onClose={() => setModal(null)} onCreated={async () => { await loadData(); setNotice('Acceso creado y validado. La persona ya puede iniciar sesión con el correo y la contraseña definidos.') }} /></Modal>}
-      {userToDelete && <Modal title="Desactivar usuario" onClose={() => setUserToDelete(null)}><DeleteUserForm user={userToDelete} onClose={() => setUserToDelete(null)} onDeleted={async () => { await loadData(); setNotice('Usuario desactivado. Sus acciones, expedientes y archivos se conservaron.') }} /></Modal>}
+      {userToDelete && <Modal title="Desactivar usuario" onClose={() => setUserToDelete(null)}><DeleteUserForm user={userToDelete} onClose={() => setUserToDelete(null)} onDeleted={async () => { await loadData(); setProfiles(await localData<Profile[]>('profiles')); setNotice('Usuario desactivado. Sus acciones, expedientes y archivos se conservaron.') }} /></Modal>}
+      {userToReactivate && <Modal title="Reactivar usuario" onClose={() => setUserToReactivate(null)}><ReactivateUserForm user={userToReactivate} onClose={() => setUserToReactivate(null)} onReactivated={async () => { await loadData(); setProfiles(await localData<Profile[]>('profiles')); setNotice('Usuario reactivado. Ya puede iniciar sesión con las nuevas credenciales.') }} /></Modal>}
     </div>
   )
 }

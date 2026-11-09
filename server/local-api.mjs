@@ -86,7 +86,7 @@ export async function handleLocalApi(req, res, url, pool, currentSession, storag
   }
 
   if (url.pathname === '/api/local/users' && req.method === 'POST'
-    || /^\/api\/local\/users\/[^/]+$/.test(url.pathname) && req.method === 'DELETE') {
+    || /^\/api\/local\/users\/[^/]+$/.test(url.pathname) && ['DELETE', 'PATCH'].includes(req.method)) {
     if (profile.role !== 'owner') return reply(res, 403, { error: 'Solo el dueño puede administrar usuarios.' })
     let sameOrigin = false
     try {
@@ -94,13 +94,15 @@ export async function handleLocalApi(req, res, url, pool, currentSession, storag
       sameOrigin = ['http:', 'https:'].includes(origin.protocol) && origin.host === req.headers.host
     } catch {}
     if (!sameOrigin) return reply(res, 403, { error: 'Solicitud rechazada por seguridad.' })
-    if (req.method === 'DELETE' && !uuidPattern.test(url.pathname.split('/').at(-1))) {
+    if (!uuidPattern.test(url.pathname.split('/').at(-1)) && req.method !== 'POST') {
       return reply(res, 400, { error: 'Identificador inválido.' })
     }
     try {
       const saved = req.method === 'POST'
         ? await createLocalUser(pool, await readJsonBody(req))
-        : await deactivateLocalUser(pool, url.pathname.split('/').at(-1))
+        : req.method === 'DELETE'
+          ? await deactivateLocalUser(pool, url.pathname.split('/').at(-1))
+          : await reactivateLocalUser(pool, url.pathname.split('/').at(-1), await readJsonBody(req))
       return reply(res, req.method === 'POST' ? 201 : 200, { data: saved })
     } catch (error) {
       if (error instanceof LocalApiError) return reply(res, error.status, { error: error.message })
@@ -301,6 +303,34 @@ export async function deactivateLocalUser(pool, id) {
     const { rows } = await client.query("UPDATE aa_local.profiles SET is_active = false, local_managed = true WHERE id = $1 AND role <> 'owner' RETURNING id", [id])
     if (!rows.length) throw new LocalApiError(404, 'Usuario no encontrado o protegido.')
     await client.query('DELETE FROM aa_local.login_credentials WHERE user_id = $1', [id])
+    await client.query('COMMIT')
+    return { id }
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
+export async function reactivateLocalUser(pool, id, input) {
+  const email = typeof input?.email === 'string' ? input.email.trim().toLowerCase() : ''
+  const password = input?.password
+  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    || typeof password !== 'string' || password.length < 10 || password.length > 1024
+    || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) {
+    throw new LocalApiError(400, 'Escribe un correo válido y una contraseña con 10 caracteres, mayúscula, minúscula y número.')
+  }
+  const salt = randomBytes(16).toString('hex')
+  const hash = await passwordHash(password, salt)
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const { rows } = await client.query("UPDATE aa_local.profiles SET is_active = true, local_managed = true WHERE id = $1 AND role <> 'owner' AND is_active = false RETURNING id", [id])
+    if (!rows.length) throw new LocalApiError(404, 'Usuario no encontrado, ya activo o protegido.')
+    await client.query(`INSERT INTO aa_local.login_credentials (user_id, email, password_salt, password_hash)
+      VALUES ($1, $2, $3, $4) ON CONFLICT (user_id) DO UPDATE SET email = EXCLUDED.email,
+      password_salt = EXCLUDED.password_salt, password_hash = EXCLUDED.password_hash`, [id, email, salt, hash])
     await client.query('COMMIT')
     return { id }
   } catch (error) {
