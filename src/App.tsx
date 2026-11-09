@@ -10,6 +10,7 @@ import {
   EyeOff,
   LayoutDashboard,
   LogOut,
+  MessageCircle,
   Menu,
   PawPrint,
   Plus,
@@ -26,6 +27,7 @@ import type { DetailedPet } from './components/PetDetails'
 import { localData, localWrite } from './lib/localApi'
 const PetDetails = lazy(() => import('./components/PetDetails').then((module) => ({ default: module.PetDetails })))
 const environmentLabel = import.meta.env.MODE === 'production' ? null : 'PRUEBAS'
+const supportWhatsAppUrl = 'https://wa.me/529842852815?text=Necesito%20servicio%20tecnico%20con%20Accion%20Animal'
 
 type Role = 'owner' | 'veterinarian' | 'reception'
 type View = 'dashboard' | 'pets' | 'inactive-pets' | 'users'
@@ -161,6 +163,7 @@ function Login({ onLogin }: { onLogin: (user: LocalUser) => void }) {
             {!loading && <ChevronRight size={18} />}
           </button>
           <p className="login-help">Puedes ingresar sin conexión a internet con la cuenta proporcionada por el administrador.</p>
+          <a className="button secondary full help-button" href={supportWhatsAppUrl} target="_blank" rel="noreferrer"><MessageCircle size={18} /> Solicitar ayuda</a>
         </form>
       </section>
       <svg className="login-dog" viewBox="0 0 220 210" aria-hidden="true" focusable="false">
@@ -626,6 +629,7 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
               </button>
             )
           })}
+          <a className="menu-support" href={supportWhatsAppUrl} target="_blank" rel="noreferrer" onClick={() => setMobileNav(false)}><MessageCircle size={19} /><span>Solicitar ayuda</span></a>
         </nav>
         <div className="sidebar-profile">
           <span className="avatar">{initials(profile.display_name)}</span>

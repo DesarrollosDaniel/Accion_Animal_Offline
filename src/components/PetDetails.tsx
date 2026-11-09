@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Camera, ChevronDown, ChevronLeft, ChevronRight, FileText, Image as ImageIcon, Info, MoreHorizontal, PawPrint, Pencil, Plus, RotateCcw, ShieldCheck, Stethoscope, Trash2, X } from 'lucide-react'
+import { Camera, ChevronDown, ChevronLeft, ChevronRight, FileText, Image as ImageIcon, Info, MoreHorizontal, PawPrint, Pencil, Plus, RotateCcw, ShieldCheck, Siren, Stethoscope, Trash2, X } from 'lucide-react'
 import { localFileUrl, uploadLocalFile } from '../lib/localFiles'
 import { verifyLocalPassword } from '../lib/localAuth'
 import { localData, localWrite } from '../lib/localApi'
@@ -293,7 +293,7 @@ function PetEditForm({ pet, latestWeight, vaccinations, note, onSaved, onCancel 
   </form>
 }
 
-function ClinicalRecordCard({ record, canEdit, onEdit, onDelete, onDeleteFile }: { record: ClinicalRecord; canEdit: boolean; onEdit: () => void; onDelete: () => void; onDeleteFile: (file: ClinicalFile) => Promise<boolean> }) {
+function ClinicalRecordCard({ record, canEdit, onEdit, loadingEdit, onDelete, onDeleteFile }: { record: ClinicalRecord; canEdit: boolean; onEdit: () => void; loadingEdit: boolean; onDelete: () => void; onDeleteFile: (file: ClinicalFile) => Promise<boolean> }) {
   const [selectedPhotoIndex, setSelectedPhotoIndex] = useState<number | null>(null)
   const [files, setFiles] = useState<ClinicalFile[]>([])
   const [filesLoaded, setFilesLoaded] = useState(false)
@@ -348,7 +348,7 @@ function ClinicalRecordCard({ record, canEdit, onEdit, onDelete, onDeleteFile }:
         {filesError && <p className="form-error" role="alert">{filesError}<button type="button" className="text-button" onClick={() => void loadFiles()}>Reintentar adjuntos</button></p>}
         {loadingFiles && <p role="status">Cargando adjuntos…</p>}
         {moreFiles && <button type="button" className="text-button" disabled={loadingFiles} onClick={() => void loadFiles(true)}>Cargar más adjuntos</button>}
-        {canEdit && <div className="record-actions"><details className="action-menu"><summary className="icon-button action-menu-trigger" aria-label="Acciones del expediente" title="Acciones"><MoreHorizontal size={19} /></summary><div className="action-menu-popover" role="menu"><button type="button" role="menuitem" onClick={onEdit}><Pencil size={15} /> Editar expediente</button><button type="button" role="menuitem" className="destructive" onClick={onDelete}><Trash2 size={15} /> Eliminar expediente</button></div></details></div>}
+        {canEdit && <div className="record-actions"><details className="action-menu"><summary className="icon-button action-menu-trigger" aria-label="Acciones del expediente" title="Acciones"><MoreHorizontal size={19} /></summary><div className="action-menu-popover" role="menu"><button type="button" role="menuitem" disabled={loadingEdit} onClick={onEdit}>{loadingEdit ? <><RotateCcw size={15} /> Cargando versión actual…</> : <><Pencil size={15} /> Editar expediente</>}</button><button type="button" role="menuitem" className="destructive" onClick={onDelete}><Trash2 size={15} /> Eliminar expediente</button></div></details></div>}
         <section className="record-text-grid">
           <Observation label="Historia clínica" value={record.history} />
           <Observation label="Examen físico general" value={record.physical_exam} />
@@ -451,11 +451,15 @@ function ClinicalRecordForm({ pet, professionalName, record, onSaved, onCancel }
   const [uploadedFiles, setUploadedFiles] = useState(new Map<File, string>())
   const [registeredFiles, setRegisteredFiles] = useState(new Set<File>())
   const [creationUnconfirmed, setCreationUnconfirmed] = useState(false)
+  const [versionConflict, setVersionConflict] = useState(false)
+  const [refreshingVersion, setRefreshingVersion] = useState(false)
+  const [versionRefreshed, setVersionRefreshed] = useState(false)
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setSaving(true)
     setError('')
+    setVersionRefreshed(false)
     const form = event.currentTarget
     const data = new FormData(form)
     const photos = Array.from((form.elements.namedItem('photos') as HTMLInputElement).files || [])
@@ -522,9 +526,46 @@ function ClinicalRecordForm({ pet, professionalName, record, onSaved, onCancel }
     } catch (caught) {
       // Keep saved records and physical uploads on failure: a lost response must not erase clinical data.
       setCreationUnconfirmed(!recordWasSaved)
+      setVersionConflict(caught instanceof Error && caught.message.includes('El registro cambió; vuelve a cargarlo antes de guardar.'))
       setError(`${recordWasSaved ? 'El expediente está guardado; puedes reintentar los adjuntos pendientes. ' : 'No se pudo confirmar el alta. Cierra el formulario y revisa el historial antes de crear otro expediente. '}${caught instanceof Error ? caught.message : 'No fue posible guardar el expediente.'}`)
       await onSaved()
       setSaving(false)
+    }
+  }
+
+  async function refreshConflictedRecord(event: React.MouseEvent<HTMLButtonElement>) {
+    if (!record) return
+    const form = event.currentTarget.closest('form')
+    setRefreshingVersion(true)
+    try {
+      const latest = await localData<ClinicalRecord>(`clinical-records/${record.id}`)
+      const currentValues: Record<string, string | boolean> = {
+        occurred_at: localDateTimeValue(latest.occurred_at), attending_professional: latest.attending_professional || '',
+        temperature_observation: latest.temperature_observation || '', history: latest.history || '',
+        physical_exam: latest.physical_exam || '', provisional_diagnosis: latest.provisional_diagnosis || '',
+        prognosis: latest.prognosis || '', treatment: latest.treatment || '',
+        estimated_cost: latest.estimated_cost === null ? '' : String(latest.estimated_cost), budget_notes: latest.budget_notes || '',
+        heart_rate_observation: latest.heart_rate_observation || '', respiratory_rate_observation: latest.respiratory_rate_observation || '',
+        hydration_observation: latest.hydration_observation || '', lymph_nodes_observation: latest.lymph_nodes_observation || '',
+        capillary_refill_observation: latest.capillary_refill_observation || '', vomiting: Boolean(latest.vomiting),
+        vomiting_notes: latest.vomiting_notes || '', diarrhea: Boolean(latest.diarrhea), diarrhea_notes: latest.diarrhea_notes || '',
+      }
+      for (const element of Array.from(form?.elements || [])) {
+        if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) || !(element.name in currentValues)) continue
+        if (element instanceof HTMLInputElement && element.type === 'checkbox') {
+          if (element.checked === element.defaultChecked) element.checked = Boolean(currentValues[element.name])
+        } else if (element.value === element.defaultValue) {
+          element.value = String(currentValues[element.name])
+        }
+      }
+      setSavedRecord(latest)
+      setVersionConflict(false)
+      setVersionRefreshed(true)
+      setError('Se cargó la versión más reciente. Tus datos siguen en el formulario; vuelve a guardar los cambios.')
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'No fue posible cargar la versión más reciente.')
+    } finally {
+      setRefreshingVersion(false)
     }
   }
 
@@ -556,7 +597,8 @@ function ClinicalRecordForm({ pet, professionalName, record, onSaved, onCancel }
         <label>Fotografías<input name="photos" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/bmp" multiple /></label>
         <label>Documentos<input name="documents" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.pptx,video/mp4" multiple /></label>
         <p className="form-note span-2"><FileText size={17} /> {record ? 'Los archivos seleccionados se agregarán al expediente; los actuales se conservan hasta que los elimines.' : 'Adjuntos privados de esta consulta. Máximo 50 MB por archivo.'}</p>
-        {error && <p className="form-error span-2" role="alert">{error}</p>}
+        {error && <p className={`form-error span-2${versionRefreshed ? ' version-refreshed' : ''}`} role="alert">{error}</p>}
+        {versionConflict && <button type="button" className="button secondary span-2" onClick={(event) => void refreshConflictedRecord(event)} disabled={refreshingVersion || saving}><Siren size={18} aria-hidden="true" /> {refreshingVersion ? 'Cargando versión actual…' : 'Conservar mis cambios y cargar versión actual'}</button>}
         <div className="form-actions span-2"><button type="button" className="button secondary" onClick={onCancel} disabled={saving}>Cancelar</button><button type="submit" className="button primary" disabled={saving || creationUnconfirmed}>{saving ? 'Guardando expediente…' : record ? 'Guardar cambios' : 'Guardar expediente'}</button></div>
       </div>
     </form>
@@ -580,6 +622,7 @@ export function PetDetails({ pet, role, professionalName, onPetChanged, onPetDel
   const [showForm, setShowForm] = useState(false)
   const [editingPet, setEditingPet] = useState(false)
   const [editingRecord, setEditingRecord] = useState<ClinicalRecord | null>(null)
+  const [loadingEditRecordId, setLoadingEditRecordId] = useState<string | null>(null)
   const [changingStatus, setChangingStatus] = useState(false)
   const [changingPhoto, setChangingPhoto] = useState(false)
   const [photoFailed, setPhotoFailed] = useState(false)
@@ -705,6 +748,19 @@ export function PetDetails({ pet, role, professionalName, onPetChanged, onPetDel
     await loadRecords()
     onRecordsChanged()
   }
+  async function editRecord(record: ClinicalRecord) {
+    setError('')
+    setLoadingEditRecordId(record.id)
+    try {
+      const latest = await localData<ClinicalRecord>(`clinical-records/${record.id}`)
+      setShowForm(false)
+      setEditingRecord(latest)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No fue posible cargar la versión actual del expediente.')
+    } finally {
+      setLoadingEditRecordId(null)
+    }
+  }
   return (
     <div className="pet-details">
       {editingPet ? <PetEditForm pet={pet} latestWeight={latestWeight} vaccinations={vaccinations} note={note} onSaved={(updatedPet, refresh = true) => { onPetChanged(updatedPet); if (refresh) void loadRecords() }} onCancel={() => setEditingPet(false)} /> : <section className="pet-profile-card">
@@ -737,7 +793,7 @@ export function PetDetails({ pet, role, professionalName, onPetChanged, onPetDel
         {showForm && <ClinicalRecordForm pet={pet} professionalName={professionalName} onSaved={recordsSaved} onCancel={() => setShowForm(false)} />}
         {editingRecord && <ClinicalRecordForm pet={pet} professionalName={professionalName} record={editingRecord} onSaved={recordsSaved} onCancel={() => setEditingRecord(null)} />}
         {error && <p className="form-error" role="alert">{error}</p>}
-        {loading && records.length === 0 ? <div className="inline-loader"><span className="loader" /> Cargando historial…</div> : records.length === 0 ? <div className="clinical-empty"><Stethoscope size={25} /><strong>Sin expedientes médicos</strong><span>Registra la primera consulta de esta mascota.</span></div> : <div className="clinical-records">{records.map((record) => <ClinicalRecordCard key={`${record.id}:${record.row_version}`} record={record} canEdit={canEdit} onEdit={() => { setShowForm(false); setEditingRecord(record) }} onDelete={() => setDeleteTarget({ kind: 'record', record })} onDeleteFile={deleteClinicalFile} />)}</div>}
+        {loading && records.length === 0 ? <div className="inline-loader"><span className="loader" /> Cargando historial…</div> : records.length === 0 ? <div className="clinical-empty"><Stethoscope size={25} /><strong>Sin expedientes médicos</strong><span>Registra la primera consulta de esta mascota.</span></div> : <div className="clinical-records">{records.map((record) => <ClinicalRecordCard key={`${record.id}:${record.row_version}`} record={record} canEdit={canEdit} onEdit={() => void editRecord(record)} loadingEdit={loadingEditRecordId === record.id} onDelete={() => setDeleteTarget({ kind: 'record', record })} onDeleteFile={deleteClinicalFile} />)}</div>}
       </section>
       {hasMore && <button className="button secondary" disabled={loading} onClick={() => void loadRecords(true)}>{loading ? 'Cargando…' : 'Cargar más expedientes'}</button>}
       {deleteTarget && <PasswordDeleteDialog

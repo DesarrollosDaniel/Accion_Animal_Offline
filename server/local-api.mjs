@@ -240,6 +240,13 @@ export async function handleLocalApi(req, res, url, pool, currentSession, storag
     }
   }
 
+  if (parts.length === 4 && parts[2] === 'clinical-records') {
+    const recordId = parts[3]
+    if (!uuidPattern.test(recordId)) return reply(res, 400, { error: 'Identificador de expediente inválido.' })
+    const { rows } = await pool.query('SELECT * FROM aa_local.clinical_records WHERE id = $1', [recordId])
+    return rows[0] ? reply(res, 200, { data: rows[0] }) : reply(res, 404, { error: 'Expediente no encontrado.' })
+  }
+
   if (parts.length === 5 && parts[2] === 'clinical-records' && parts[4] === 'files') {
     const recordId = parts[3]
     if (!uuidPattern.test(recordId)) return reply(res, 400, { error: 'Identificador de expediente inválido.' })

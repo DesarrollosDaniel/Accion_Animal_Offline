@@ -304,7 +304,7 @@ async function start() {
         const previous = parseCookies(req)[cookieName]
         if (previous) sessions.delete(previous)
         const id = randomBytes(32).toString('base64url')
-        const expiresAt = Date.now() + 8 * 60 * 60 * 1000
+        const expiresAt = Date.now() + 12 * 60 * 60 * 1000
         sessions.set(id, { ...user, expiresAt, verifiedAt: Date.now() })
         return json(res, 200, { user: { id: user.userId, email: user.email } }, {
           'Set-Cookie': `${cookieName}=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor((expiresAt - Date.now()) / 1000)}${req.socket.encrypted ? '; Secure' : ''}`,

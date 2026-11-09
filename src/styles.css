@@ -54,11 +54,13 @@ textarea { resize: vertical; }
 .login-card label + label { margin-top: 18px; }
 .login-card .button { margin-top: 24px; }
 .login-help { color: var(--muted); text-align: center; font-size: .84rem; margin: 24px 0 0; }
+.login-card .help-button { margin-top: 14px; text-decoration: none; }
 .login-dog { --dog-hidden: 110%; position: absolute; right: clamp(10px, 3vw, 48px); bottom: 0; width: clamp(120px, 13vw, 190px); height: auto; pointer-events: none; transform: translateY(var(--dog-hidden)); animation: dog-peek 8s ease-in-out infinite; filter: drop-shadow(0 8px 12px rgba(18, 61, 48, .16)); }
 .login-dog-wave { transform-origin: 168px 188px; animation: dog-wave 8s ease-in-out infinite; }
 @keyframes dog-peek { 0%, 8%, 75%, 100% { transform: translateY(var(--dog-hidden)); } 18%, 64% { transform: translateY(0); } }
 @keyframes dog-wave { 0%, 23%, 48%, 100% { transform: rotate(0); } 29%, 39% { transform: rotate(-22deg); } 34%, 44% { transform: rotate(10deg); } }
 .form-error { color: #a32d2d; background: #fff0f0; border: 1px solid #f3cccc; border-radius: 9px; padding: 10px 12px; font-size: .86rem; margin: 15px 0 0; }
+.form-error.version-refreshed { color: #315f4d; background: #eef8f2; border-color: #c7e2d2; }
 .button { display: inline-flex; justify-content: center; align-items: center; gap: 8px; min-height: 42px; border-radius: 10px; border: 0; padding: 10px 16px; font-weight: 700; transition: transform .15s, background .2s, opacity .2s; }
 .button:hover:not(:disabled) { transform: translateY(-1px); }
 .button:disabled { cursor: not-allowed; opacity: .55; }
@@ -84,6 +86,8 @@ textarea { resize: vertical; }
 .sidebar nav button { width: 100%; display: flex; align-items: center; gap: 12px; color: rgba(255,255,255,.66); border: 0; background: transparent; border-radius: 9px; padding: 11px 12px; margin: 4px 0; text-align: left; }
 .sidebar nav button:hover { color: white; background: rgba(255,255,255,.06); }
 .sidebar nav button.active { color: white; background: var(--green-700); }
+.sidebar nav .menu-support { width: 100%; display: flex; align-items: center; gap: 12px; color: rgba(255,255,255,.66); border-radius: 9px; padding: 11px 12px; margin: 4px 0; text-align: left; text-decoration: none; }
+.sidebar nav .menu-support:hover { color: white; background: rgba(255,255,255,.06); }
 .sidebar-profile { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; padding: 15px 4px 0; border-top: 1px solid rgba(255,255,255,.1); }
 .sidebar-profile strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .84rem; }
 .sidebar-profile span:not(.avatar) { color: rgba(255,255,255,.5); font-size: .72rem; }
