@@ -102,6 +102,12 @@ La administración de cuentas se realiza en el servidor local, incluso sin Inter
 
 ## Ejecución local
 
+### Cambios pendientes en cada dispositivo
+
+Al registrar una mascota o un expediente nuevo, o al cambiar la foto de una mascota, la aplicación guarda primero la solicitud en IndexedDB del navegador. Los adjuntos clínicos seleccionados se guardan junto con la consulta. Después intenta enviarlos al PC servidor y vuelve a intentar cada 15 segundos y cuando el navegador detecta que regresó la conexión. La pantalla muestra cuántos cambios siguen pendientes. Los reintentos usan el mismo identificador para evitar altas duplicadas si se perdió la respuesta del servidor.
+
+Los pendientes pertenecen al usuario que los creó y se envían cuando ese usuario vuelve a iniciar sesión en el mismo navegador. Mantén la aplicación abierta para que se ejecuten los reintentos. No borres los datos del navegador, uses navegación privada ni desinstales la aplicación mientras haya pendientes: el navegador puede eliminar ese almacenamiento. Para abrir la aplicación o iniciar sesión de nuevo se necesita conexión con el PC servidor. Las ediciones de expedientes existentes todavía requieren conexión.
+
 La configuración de esta copia de pruebas está en `.env.local`, archivo ignorado por Git. Debe contener la URL y la clave publicable del proyecto Supabase de pruebas.
 
 ```powershell

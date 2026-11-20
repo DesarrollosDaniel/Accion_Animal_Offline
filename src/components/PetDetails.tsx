@@ -4,6 +4,8 @@ import { Camera, ChevronDown, ChevronLeft, ChevronRight, FileText, Image as Imag
 import { localFileUrl, uploadLocalFile } from '../lib/localFiles'
 import { verifyLocalPassword } from '../lib/localAuth'
 import { localData, localWrite } from '../lib/localApi'
+import { flushPendingWrites, pendingWrites, queueWrites, type PendingWrite } from '../lib/pendingWrites'
+import { randomUuid } from '../lib/uuid'
 import { vaccinesForSpecies } from '../lib/vaccines'
 
 type Role = 'owner' | 'veterinarian' | 'reception'
@@ -131,15 +133,6 @@ function valueOrDash(value: string | null | undefined) {
 function safeFileName(value: string) {
   const normalized = value.normalize('NFKC').replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim()
   return normalized.slice(0, 160) || 'archivo'
-}
-
-function randomUuid() {
-  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
-  const bytes = crypto.getRandomValues(new Uint8Array(16))
-  bytes[6] = (bytes[6] & 0x0f) | 0x40
-  bytes[8] = (bytes[8] & 0x3f) | 0x80
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
 function fileSize(bytes: number) {
@@ -437,8 +430,9 @@ function PasswordDeleteDialog({ title, description, confirmLabel, onClose, onCon
   )
 }
 
-function ClinicalRecordForm({ pet, professionalName, record, onSaved, onCancel }: {
+function ClinicalRecordForm({ pet, userId, professionalName, record, onSaved, onCancel }: {
   pet: DetailedPet
+  userId: string
   professionalName: string
   record?: ClinicalRecord
   onSaved: () => Promise<void>
@@ -491,6 +485,38 @@ function ClinicalRecordForm({ pet, professionalName, record, onSaved, onCancel }
       vomiting_notes: String(data.get('vomiting_notes') || '').trim() || null,
       diarrhea: data.get('diarrhea') === 'on',
       diarrhea_notes: String(data.get('diarrhea_notes') || '').trim() || null,
+    }
+
+    if (!record) {
+      try {
+        const recordId = randomUuid()
+        const now = Date.now()
+        const writes: PendingWrite[] = [{
+          id: recordId, userId, createdAt: now, kind: 'record', path: `pets/${pet.id}/clinical-records`,
+          body: { client_id: recordId, record: recordValues, weight: weight ? { weight_kg: Number(weight) } : null },
+        }]
+        for (const [kind, files, directory] of [
+          ['photo', photos, photoDirectory], ['document', documents, fileDirectory],
+        ] as const) {
+          for (const file of files) {
+            if (file.size > 50 * 1024 * 1024) throw new Error(`${file.name} supera el límite de 50 MB.`)
+            const path = `${directory}/${randomUuid()}-${safeFileName(file.name)}`
+            writes.push({ id: randomUuid(), userId, createdAt: now + writes.length, kind: 'file', path, file,
+              body: { recordPath: `clinical-records/${recordId}/files`, metadata: {
+                kind, object_path: path, original_name: file.name,
+                mime_type: file.type || 'application/octet-stream', size_bytes: file.size,
+              } },
+            })
+          }
+        }
+        await queueWrites(writes)
+        await flushPendingWrites(userId)
+        if (!(await pendingWrites(userId)).some((write) => writes.some((entry) => entry.id === write.id))) await onSaved().catch(() => {})
+        onCancel()
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : 'No se pudo guardar la consulta en este dispositivo.')
+      } finally { setSaving(false) }
+      return
     }
 
     let recordWasSaved = Boolean(savedRecord || record)
@@ -605,8 +631,10 @@ function ClinicalRecordForm({ pet, professionalName, record, onSaved, onCancel }
   )
 }
 
-export function PetDetails({ pet, role, professionalName, onPetChanged, onPetDeleted, onRecordsChanged }: {
+export function PetDetails({ pet, userId, refreshSignal, role, professionalName, onPetChanged, onPetDeleted, onRecordsChanged }: {
   pet: DetailedPet
+  userId: string
+  refreshSignal: number
   role: Role
   professionalName: string
   onPetChanged: (pet: DetailedPet, movedList?: boolean) => void
@@ -665,10 +693,16 @@ export function PetDetails({ pet, role, professionalName, onPetChanged, onPetDel
     setPhotoMessage('')
     let storedPath = ''
     try {
-      storedPath = await uploadLocalFile(target, file)
-      const updated = await localWrite<DetailedPet>(`pets/${pet.id}`, 'PATCH', { expected_version: pet.row_version, changes: { photo_path: storedPath } })
-      onPetChanged(updated)
-      setPhotoMessage('Foto actualizada. La anterior se conserva hasta confirmar la sincronización.')
+      const writeId = randomUuid()
+      await queueWrites([{ id: writeId, userId, createdAt: Date.now(), kind: 'petPhoto', path: target, file,
+        expectedVersion: pet.row_version, body: { petPath: `pets/${pet.id}`, previousPhoto: pet.photo_path } }])
+      await flushPendingWrites(userId)
+      if ((await pendingWrites(userId)).some((write) => write.id === writeId)) setPhotoMessage('Foto guardada en este dispositivo. Se subirá cuando vuelva la conexión.')
+      else {
+        const updated = await localData<DetailedPet>(`pets/${pet.id}`)
+        onPetChanged(updated)
+        setPhotoMessage('Foto actualizada. La anterior se conserva hasta confirmar la sincronización.')
+      }
     } catch (changeError) {
       // Preserve an upload when its database response may have been lost.
       setPhotoMessage(changeError instanceof Error ? changeError.message : 'No fue posible cambiar la foto.')
@@ -704,6 +738,7 @@ export function PetDetails({ pet, role, professionalName, onPetChanged, onPetDel
     }
   }, [pet.id, records.length])
   useEffect(() => { void loadRecords() }, [pet.id])
+  useEffect(() => { if (refreshSignal) void loadRecords() }, [refreshSignal])
 
   async function changeStatus() {
     const nextStatus: DetailedPet['status'] = pet.status === 'active' ? 'deceased' : 'active'
@@ -814,8 +849,8 @@ export function PetDetails({ pet, role, professionalName, onPetChanged, onPetDel
       <section className="clinical-section">
         <div className="clinical-section-header"><div><p className="eyebrow">Historial</p><h3>Expedientes médicos</h3></div>{canEdit && !showForm && !editingRecord && <button className="button primary" onClick={() => setShowForm(true)}><Plus size={17} /> Nuevo expediente</button>}</div>
         {!canEdit && <p className="form-note"><Stethoscope size={17} /> Recepción puede consultar el historial; solo Dueño y Veterinaria pueden modificarlo.</p>}
-        {showForm && <ClinicalRecordForm pet={pet} professionalName={professionalName} onSaved={recordsSaved} onCancel={() => setShowForm(false)} />}
-        {editingRecord && <ClinicalRecordForm pet={pet} professionalName={professionalName} record={editingRecord} onSaved={recordsSaved} onCancel={() => setEditingRecord(null)} />}
+        {showForm && <ClinicalRecordForm pet={pet} userId={userId} professionalName={professionalName} onSaved={recordsSaved} onCancel={() => setShowForm(false)} />}
+        {editingRecord && <ClinicalRecordForm pet={pet} userId={userId} professionalName={professionalName} record={editingRecord} onSaved={recordsSaved} onCancel={() => setEditingRecord(null)} />}
         {error && <p className="form-error" role="alert">{error}</p>}
         {loading && records.length === 0 ? <div className="inline-loader"><span className="loader" /> Cargando historial…</div> : records.length === 0 ? <div className="clinical-empty"><Stethoscope size={25} /><strong>Sin expedientes médicos</strong><span>Registra la primera consulta de esta mascota.</span></div> : <div className="clinical-records">{records.map((record) => <ClinicalRecordCard key={`${record.id}:${record.row_version}`} record={record} canEdit={canEdit} onEdit={() => void editRecord(record)} loadingEdit={loadingEditRecordId === record.id} onDelete={() => setDeleteTarget({ kind: 'record', record })} onDeleteFile={deleteClinicalFile} />)}</div>}
       </section>

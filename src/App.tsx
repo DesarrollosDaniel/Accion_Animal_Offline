@@ -25,6 +25,8 @@ import { currentLocalUser, localLogin, type LocalUser } from './lib/localAuth'
 import { vaccineOptions } from './lib/vaccines'
 import type { DetailedPet } from './components/PetDetails'
 import { localData, localWrite } from './lib/localApi'
+import { flushPendingWrites, pendingWrites, queueWrites } from './lib/pendingWrites'
+import { randomUuid } from './lib/uuid'
 const PetDetails = lazy(() => import('./components/PetDetails').then((module) => ({ default: module.PetDetails })))
 const environmentLabel = import.meta.env.MODE === 'production' ? null : 'PRUEBAS'
 const supportWhatsAppUrl = 'https://wa.me/529842852815?text=Necesito%20servicio%20tecnico%20con%20Accion%20Animal'
@@ -257,7 +259,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   )
 }
 
-function PetForm({ onClose, onSaved }: { onClose: () => void; onSaved: (petId: string) => Promise<void> }) {
+function PetForm({ userId, onClose, onSaved }: { userId: string; onClose: () => void; onSaved: (petId: string) => Promise<void> }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [species, setSpecies] = useState<keyof typeof vaccineOptions | ''>('')
@@ -321,12 +323,14 @@ function PetForm({ onClose, onSaved }: { onClose: () => void; onSaved: (petId: s
       return
     }
     try {
-      const insertedPet = await localData<LocalPet>('pets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pet: payload, vaccinations: selectedVaccinations.map((entry) => ({ ...entry, administered_on: entry.administered_on || todayDateValue() })), note: observation || null }),
-      })
-      await onSaved(insertedPet.id)
+      const id = randomUuid()
+      await queueWrites([{ id, userId, createdAt: Date.now(), kind: 'pet', path: 'pets', body: {
+        client_id: id, pet: payload,
+        vaccinations: selectedVaccinations.map((entry) => ({ ...entry, administered_on: entry.administered_on || todayDateValue() })),
+        note: observation || null,
+      } }])
+      await flushPendingWrites(userId)
+      if (!(await pendingWrites(userId)).some((write) => write.id === id)) await onSaved(id).catch(() => {})
       onClose()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'No fue posible guardar la mascota local.')
@@ -546,6 +550,9 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
   const [userToDelete, setUserToDelete] = useState<Profile | null>(null)
   const [userToReactivate, setUserToReactivate] = useState<Profile | null>(null)
   const [selectedPetId, setSelectedPetId] = useState<string | null>(restoredWorkspace.selectedPetId)
+  const [pendingCount, setPendingCount] = useState(0)
+  const [pendingError, setPendingError] = useState('')
+  const [syncEpoch, setSyncEpoch] = useState(0)
 
   const loadData = useCallback(async () => {
     setLoading(true)
@@ -564,6 +571,37 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
     }
     setLoading(false)
   }, [session.user.id])
+
+  useEffect(() => {
+    let active = true
+    let syncing = false
+    const refresh = () => { void pendingWrites(session.user.id).then((writes) => { if (active) setPendingCount(writes.length) }).catch(() => {}) }
+    const sync = async () => {
+      if (syncing) return
+      syncing = true
+      try {
+        const before = await pendingWrites(session.user.id)
+        if (before.length) {
+          const result = await flushPendingWrites(session.user.id)
+          if (active) {
+            setPendingCount(result.remaining)
+            setPendingError(result.error)
+          }
+        }
+      } catch (cause) {
+        if (active) setPendingError(cause instanceof Error ? cause.message : 'No se pudo leer el almacenamiento de este dispositivo.')
+      } finally { syncing = false }
+    }
+    refresh()
+    void sync()
+    const timer = window.setInterval(() => void sync(), 15000)
+    const online = () => void sync()
+    const synced = () => { setSyncEpoch((value) => value + 1); void loadData() }
+    window.addEventListener('online', online)
+    window.addEventListener('pending-writes-changed', refresh)
+    window.addEventListener('pending-writes-synced', synced)
+    return () => { active = false; window.clearInterval(timer); window.removeEventListener('online', online); window.removeEventListener('pending-writes-changed', refresh); window.removeEventListener('pending-writes-synced', synced) }
+  }, [session.user.id, loadData])
 
   useEffect(() => { void loadData() }, [loadData])
 
@@ -652,7 +690,7 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
   if (loading && !profile) return <div className="app-loader"><span className="loader" /><p>Cargando espacio de trabajo…</p></div>
 
   if (!profile || !profile.is_active) {
-    return <div className="app-loader"><p className="form-error">{error || 'Tu perfil no está disponible o se encuentra desactivado.'}</p><button className="button primary" onClick={() => void loadData()}>Reintentar</button><button className="button secondary" onClick={() => void onSignOut()}>Cerrar sesión</button></div>
+    return <div className="app-loader"><p className="form-error">{error || 'Tu perfil no está disponible o se encuentra desactivado.'}</p>{pendingCount > 0 && <p>{pendingCount} cambio{pendingCount === 1 ? '' : 's'} pendiente{pendingCount === 1 ? '' : 's'} permanece{pendingCount === 1 ? '' : 'n'} guardado{pendingCount === 1 ? '' : 's'} en este dispositivo.</p>}<button className="button primary" onClick={() => void loadData()}>Reintentar</button><button className="button secondary" onClick={() => void onSignOut()}>Cerrar sesión</button></div>
   }
 
   return (
@@ -695,6 +733,7 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
         <div className="content">
           {error && <div className="alert error"><strong>No se pudo cargar toda la información.</strong><span>{error}</span></div>}
           {notice && <div className="alert success" role="status"><ShieldCheck size={18} /><span>{notice}</span></div>}
+          {pendingCount > 0 && <div className="alert" role="status"><span>{pendingCount} cambio{pendingCount === 1 ? '' : 's'} guardado{pendingCount === 1 ? '' : 's'} en este dispositivo, pendiente{pendingCount === 1 ? '' : 's'} de enviar al PC servidor. Mantén la aplicación abierta cuando vuelva la conexión. {pendingError && `Último intento: ${pendingError}`}</span><button className="button secondary" onClick={() => void flushPendingWrites(session.user.id).then((result) => { setPendingCount(result.remaining); setPendingError(result.error) })}>Reintentar ahora</button></div>}
 
 
           {view === 'dashboard' && (
@@ -729,7 +768,7 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
                     <button className="button primary" onClick={() => setSelectedPetId(null)}><ArrowLeft size={18} /> Volver a resultados</button>
                     <div><p className="eyebrow">Detalle de mascota</p><h3 id="selected-pet-title">{selectedPet.name}</h3></div>
                   </header>
-                  <Suspense fallback={<p>Cargando ficha…</p>}><PetDetails key={selectedPet.id} pet={selectedPet} role={profile.role} professionalName={profile.display_name} onPetChanged={(updatedPet, movedList = false) => { setPets((current) => current.map((item) => item.id === updatedPet.id ? updatedPet : item)); setSearchResults((current) => current?.map((item) => item.id === updatedPet.id ? updatedPet : item) || null); if (movedList) { setSelectedPetId(null); void loadData() } }} onPetDeleted={() => { setSelectedPetId(null); setSearchResults(null); void loadData() }} onRecordsChanged={() => void localData<{ activePets: number; inactivePets: number; clinicalRecords: number }>('summary').then(setDashboardCounts).catch((cause) => setError(String(cause)))} /></Suspense>
+                  <Suspense fallback={<p>Cargando ficha…</p>}><PetDetails key={selectedPet.id} pet={selectedPet} userId={session.user.id} refreshSignal={syncEpoch} role={profile.role} professionalName={profile.display_name} onPetChanged={(updatedPet, movedList = false) => { setPets((current) => current.map((item) => item.id === updatedPet.id ? updatedPet : item)); setSearchResults((current) => current?.map((item) => item.id === updatedPet.id ? updatedPet : item) || null); if (movedList) { setSelectedPetId(null); void loadData() } }} onPetDeleted={() => { setSelectedPetId(null); setSearchResults(null); void loadData() }} onRecordsChanged={() => void localData<{ activePets: number; inactivePets: number; clinicalRecords: number }>('summary').then(setDashboardCounts).catch((cause) => setError(String(cause)))} /></Suspense>
                 </section>
               ) : filteredPets.length === 0 ? <EmptyState icon={PawPrint} title="Sin resultados" text={search ? 'Prueba con otro término de búsqueda.' : 'Todavía no hay mascotas registradas.'} /> : (
                 <div className="table-wrap responsive-table pet-table-wrap"><table><thead><tr><th>Mascota</th><th>Tutor</th><th>Teléfono</th><th>Especie / raza</th><th>Estado</th><th>Registro</th><th className="actions-column">Acción</th></tr></thead><tbody>{filteredPets.map((pet) => <tr className="clickable-row" key={pet.id} tabIndex={0} onClick={() => setSelectedPetId(pet.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedPetId(pet.id) } }}><td data-label="Mascota"><div className="name-cell"><PetAvatar pet={pet} size={17} /><strong>{pet.name}</strong></div></td><td data-label="Tutor">{pet.guardian_name}</td><td data-label="Teléfono">{pet.guardian_phone || '—'}</td><td data-label="Especie / raza">{[pet.species, pet.breed].filter(Boolean).join(' · ') || '—'}</td><td data-label="Estado"><span className={`status ${pet.status}`}>{pet.status === 'active' ? 'Activo' : 'Deceso'}</span></td><td data-label="Registro">{formatDate(pet.created_at)}</td><td className="actions-column"><button className="text-button detail-button" onClick={() => setSelectedPetId(pet.id)} aria-label={`Ver detalle de ${pet.name}`}>Abrir ficha</button></td></tr>)}</tbody></table></div>
@@ -748,7 +787,7 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
         </div>
       </main>
 
-      {modal === 'pet' && <Modal title="Registrar mascota" onClose={() => setModal(null)}><PetForm onClose={() => setModal(null)} onSaved={async (petId) => { await loadData(); setView('pets'); setSearch(''); setSearchResults(null); setSelectedPetId(petId); setNotice('Mascota, tutor y vacunas registrados.') }} /></Modal>}
+      {modal === 'pet' && <Modal title="Registrar mascota" onClose={() => setModal(null)}><PetForm userId={session.user.id} onClose={() => setModal(null)} onSaved={async (petId) => { await loadData(); setView('pets'); setSearch(''); setSearchResults(null); setSelectedPetId(petId); setNotice('Mascota, tutor y vacunas registrados.') }} /></Modal>}
       {modal === 'create-user' && <Modal title="Crear acceso" onClose={() => setModal(null)}><CreateUserForm onClose={() => setModal(null)} onCreated={async () => { await loadData(); setNotice('Acceso creado y validado. La persona ya puede iniciar sesión con el correo y la contraseña definidos.') }} /></Modal>}
       {userToDelete && <Modal title="Desactivar usuario" onClose={() => setUserToDelete(null)}><DeleteUserForm user={userToDelete} onClose={() => setUserToDelete(null)} onDeleted={async () => { await loadData(); setProfiles(await localData<Profile[]>('profiles')); setNotice('Usuario desactivado. Sus acciones, expedientes y archivos se conservaron.') }} /></Modal>}
       {userToReactivate && <Modal title="Reactivar usuario" onClose={() => setUserToReactivate(null)}><ReactivateUserForm user={userToReactivate} onClose={() => setUserToReactivate(null)} onReactivated={async () => { await loadData(); setProfiles(await localData<Profile[]>('profiles')); setNotice('Usuario reactivado. Ya puede iniciar sesión con las nuevas credenciales.') }} /></Modal>}

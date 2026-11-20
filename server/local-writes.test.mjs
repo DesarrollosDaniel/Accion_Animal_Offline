@@ -67,6 +67,30 @@ test('deshace todos los cambios si falla una vacuna', async () => {
   assert.equal(db.wasReleased(), true)
 })
 
+test('reintentar una mascota con el mismo client_id devuelve la existente sin duplicar hijos', async () => {
+  const db = database()
+  const original = db.pool.connect
+  db.pool.connect = async () => {
+    const client = await original()
+    const query = client.query
+    client.query = async (sql, values) => sql.includes('SELECT * FROM aa_local.pets')
+      ? { rows: [{ id: petId, created_by: actorId }] } : query(sql, values)
+    return client
+  }
+  const pet = await createPetWithRelated(db.pool, actorId, { ...payload, client_id: petId })
+  assert.equal(pet.id, petId)
+  assert.equal(db.calls.some((call) => call.sql.includes('INSERT INTO aa_local.pets')), false)
+  assert.equal(db.calls.at(-1).sql, 'COMMIT')
+})
+
+test('crea una mascota con el identificador elegido en el dispositivo', async () => {
+  const db = database()
+  await createPetWithRelated(db.pool, actorId, { ...payload, client_id: petId })
+  const insert = db.calls.find((call) => call.sql.includes('INSERT INTO aa_local.pets'))
+  assert.equal(insert.values[0], petId)
+  assert.match(insert.sql, /\(id, name,/)
+})
+
 test('rechaza campos de expediente que el cliente no puede asignar', () => {
   const record = { occurred_at: '2026-09-24T12:30:00Z', history: 'Consulta' }
   assert.throws(() => validateClinicalRecordCreation({ record: { ...record, attended_by: actorId } }), /no permitido/)
@@ -127,6 +151,30 @@ test('expediente no se guarda cuando falta la mascota o falla el peso', async ()
   await assert.rejects(createClinicalRecord(failing.pool, actorId, petId, clinicalPayload), /invalid weight/)
   assert.equal(failing.calls.at(-1).sql, 'ROLLBACK')
   assert.equal(failing.calls.some((call) => call.sql === 'COMMIT'), false)
+})
+
+test('reintentar un expediente con el mismo client_id no duplica el peso', async () => {
+  const db = clinicalDatabase()
+  const original = db.pool.connect
+  db.pool.connect = async () => {
+    const client = await original()
+    const query = client.query
+    client.query = async (sql, values) => sql.includes('SELECT * FROM aa_local.clinical_records')
+      ? { rows: [{ id: operationId, pet_id: petId, created_by: actorId }] } : query(sql, values)
+    return client
+  }
+  const record = await createClinicalRecord(db.pool, actorId, petId, { ...clinicalPayload, client_id: operationId })
+  assert.equal(record.id, operationId)
+  assert.equal(db.calls.some((call) => call.sql.includes('INSERT INTO aa_local.weight_records')), false)
+  assert.equal(db.calls.at(-1).sql, 'COMMIT')
+})
+
+test('crea un expediente con el identificador elegido en el dispositivo', async () => {
+  const db = clinicalDatabase()
+  await createClinicalRecord(db.pool, actorId, petId, { ...clinicalPayload, client_id: operationId })
+  const insert = db.calls.find((call) => call.sql.includes('INSERT INTO aa_local.clinical_records'))
+  assert.equal(insert.values[0], operationId)
+  assert.match(insert.sql, /\(id, pet_id,/)
 })
 
 test('rechaza rutas de archivo fuera de uploaded', () => {

@@ -146,8 +146,11 @@ function parsePetFields(input, allowStatus = false) {
 
 export function validatePetCreation(body) {
   if (!isRecord(body) || !isRecord(body.pet)) throw new LocalApiError(400, 'Datos de mascota inválidos.')
-  if (Object.keys(body).some((key) => !['pet', 'vaccinations', 'note'].includes(key))) {
+  if (Object.keys(body).some((key) => !['pet', 'vaccinations', 'note', 'client_id'].includes(key))) {
     throw new LocalApiError(400, 'La solicitud contiene campos no permitidos.')
+  }
+  if (body.client_id !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.client_id)) {
+    throw new LocalApiError(400, 'Identificador de solicitud inválido.')
   }
   const pet = parsePetFields(body.pet)
   pet.name = requiredText(pet.name, 200, 'name')
@@ -173,7 +176,7 @@ export function validatePetCreation(body) {
     throw new LocalApiError(400, 'La fecha de cada vacuna es obligatoria.')
   }
   const note = body.note === undefined || body.note === null ? null : requiredText(body.note, 10000, 'note')
-  return { pet, vaccinations: parsedVaccinations, note }
+  return { pet, vaccinations: parsedVaccinations, note, clientId: body.client_id }
 }
 
 function parseRecordFields(input) {
@@ -199,8 +202,11 @@ function parseRecordFields(input) {
 }
 
 export function validateClinicalRecordCreation(body) {
-  if (!isRecord(body) || !isRecord(body.record) || Object.keys(body).some((key) => !['record', 'weight'].includes(key))) {
+  if (!isRecord(body) || !isRecord(body.record) || Object.keys(body).some((key) => !['record', 'weight', 'client_id'].includes(key))) {
     throw new LocalApiError(400, 'Datos de expediente inválidos.')
+  }
+  if (body.client_id !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.client_id)) {
+    throw new LocalApiError(400, 'Identificador de solicitud inválido.')
   }
   const record = parseRecordFields(body.record)
   if (!record.occurred_at) throw new LocalApiError(400, 'occurred_at es obligatorio.')
@@ -219,7 +225,7 @@ export function validateClinicalRecordCreation(body) {
         ? null : requiredText(body.weight.notes, 1000, 'notes'),
     }
   }
-  return { record, weight }
+  return { record, weight, clientId: body.client_id }
 }
 
 function parseExpectedVersion(version) {
@@ -334,13 +340,17 @@ async function addOperation(client, table, row, actorId, dependsOn = null, actio
 }
 
 export async function createPetWithRelated(pool, actorId, body) {
-  const { pet, vaccinations, note } = validatePetCreation(body)
+  const { pet, vaccinations, note, clientId } = validatePetCreation(body)
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
     await client.query("SELECT set_config('aa.actor_id', $1, true)", [actorId])
-    const columns = [...Object.keys(pet), 'created_by', 'updated_by']
-    const values = [...Object.values(pet), actorId, actorId]
+    if (clientId) {
+      const existing = await client.query('SELECT * FROM aa_local.pets WHERE id = $1 AND created_by = $2', [clientId, actorId])
+      if (existing.rows[0]) { await client.query('COMMIT'); return existing.rows[0] }
+    }
+    const columns = [...(clientId ? ['id'] : []), ...Object.keys(pet), 'created_by', 'updated_by']
+    const values = [...(clientId ? [clientId] : []), ...Object.values(pet), actorId, actorId]
     const placeholders = columns.map((_, index) => `$${index + 1}`).join(', ')
     const result = await client.query(
       `INSERT INTO aa_local.pets (${columns.join(', ')}) VALUES (${placeholders}) RETURNING *`, values,
@@ -375,11 +385,15 @@ export async function createPetWithRelated(pool, actorId, body) {
 }
 
 export async function createClinicalRecord(pool, actorId, petId, body) {
-  const { record, weight } = validateClinicalRecordCreation(body)
+  const { record, weight, clientId } = validateClinicalRecordCreation(body)
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
     await client.query("SELECT set_config('aa.actor_id', $1, true)", [actorId])
+    if (clientId) {
+      const existing = await client.query('SELECT * FROM aa_local.clinical_records WHERE id = $1 AND pet_id = $2 AND created_by = $3', [clientId, petId, actorId])
+      if (existing.rows[0]) { await client.query('COMMIT'); return existing.rows[0] }
+    }
     const pet = await client.query('SELECT id FROM aa_local.pets WHERE id = $1 FOR KEY SHARE', [petId])
     if (!pet.rows[0]) throw new LocalApiError(404, 'Mascota no encontrada.')
     const parentOperation = await client.query(
@@ -387,8 +401,8 @@ export async function createClinicalRecord(pool, actorId, petId, body) {
        WHERE entity_table = 'pets' AND entity_id = $1
        ORDER BY source_version DESC LIMIT 1`, [petId],
     )
-    const columns = ['pet_id', ...Object.keys(record), 'attended_by', 'created_by', 'updated_by']
-    const values = [petId, ...Object.values(record), actorId, actorId, actorId]
+    const columns = [...(clientId ? ['id'] : []), 'pet_id', ...Object.keys(record), 'attended_by', 'created_by', 'updated_by']
+    const values = [...(clientId ? [clientId] : []), petId, ...Object.values(record), actorId, actorId, actorId]
     const placeholders = columns.map((_, index) => `$${index + 1}`).join(', ')
     const { rows } = await client.query(
       `INSERT INTO aa_local.clinical_records (${columns.join(', ')}) VALUES (${placeholders}) RETURNING *`, values,
