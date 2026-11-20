@@ -135,6 +135,13 @@ function safeFileName(value: string) {
   return normalized.slice(0, 160) || 'archivo'
 }
 
+const photoExtensions = new Set(['.bmp', '.gif', '.jfif', '.jpeg', '.jpg', '.png', '.webp'])
+const documentExtensions = new Set(['.doc', '.docx', '.mov', '.mp4', '.pdf', '.pptx', '.txt', '.xls', '.xlsx'])
+
+function fileExtension(name: string) {
+  return name.slice(name.lastIndexOf('.')).toLowerCase()
+}
+
 function fileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
@@ -458,6 +465,14 @@ function ClinicalRecordForm({ pet, userId, professionalName, record, onSaved, on
     const data = new FormData(form)
     const photos = Array.from((form.elements.namedItem('photos') as HTMLInputElement).files || [])
     const documents = Array.from((form.elements.namedItem('documents') as HTMLInputElement).files || [])
+    const unsupportedPhoto = photos.find((file) => !photoExtensions.has(fileExtension(file.name)))
+    const unsupportedDocument = documents.find((file) => !documentExtensions.has(fileExtension(file.name)))
+    if (unsupportedPhoto || unsupportedDocument) {
+      const file = unsupportedPhoto || unsupportedDocument!
+      setError(`${file.name} no es un formato permitido. Usa JPG, PNG, WEBP, GIF o BMP para fotos; PDF, DOC, DOCX, XLS, XLSX, TXT, PPTX, MP4 o MOV para documentos.`)
+      setSaving(false)
+      return
+    }
     const occurredAt = new Date(String(data.get('occurred_at'))).toISOString()
     const folderStamp = String(Date.now())
     const petFolder = String(pet.legacy_id || pet.id)
@@ -510,9 +525,8 @@ function ClinicalRecordForm({ pet, userId, professionalName, record, onSaved, on
           }
         }
         await queueWrites(writes)
-        await flushPendingWrites(userId)
-        if (!(await pendingWrites(userId)).some((write) => writes.some((entry) => entry.id === write.id))) await onSaved().catch(() => {})
         onCancel()
+        void flushPendingWrites(userId).catch(() => {})
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : 'No se pudo guardar la consulta en este dispositivo.')
       } finally { setSaving(false) }
@@ -621,7 +635,7 @@ function ClinicalRecordForm({ pet, userId, professionalName, record, onSaved, on
         <label>Notas del presupuesto<input name="budget_notes" defaultValue={record?.budget_notes || ''} maxLength={500} placeholder="Conceptos, anticipo o condiciones" /></label>
         <div className="form-section-title span-2"><span>Fotos y documentos locales</span></div>
         <label>Fotografías<input name="photos" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/bmp" multiple /></label>
-        <label>Documentos<input name="documents" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.pptx,video/mp4" multiple /></label>
+        <label>Documentos y videos<input name="documents" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.pptx,video/mp4,video/quicktime,.mov" multiple /></label>
         <p className="form-note span-2"><FileText size={17} /> {record ? 'Los archivos seleccionados se agregarán al expediente; los actuales se conservan hasta que los elimines.' : 'Adjuntos privados de esta consulta. Máximo 50 MB por archivo.'}</p>
         {error && <p className={`form-error span-2${versionRefreshed ? ' version-refreshed' : ''}`} role="alert">{error}</p>}
         {versionConflict && <button type="button" className="button secondary span-2" onClick={(event) => void refreshConflictedRecord(event)} disabled={refreshingVersion || saving}><Siren size={18} aria-hidden="true" /> {refreshingVersion ? 'Cargando versión actual…' : 'Conservar mis cambios y cargar versión actual'}</button>}
@@ -675,8 +689,8 @@ export function PetDetails({ pet, userId, refreshSignal, role, professionalName,
     const input = event.currentTarget
     const file = input.files?.[0]
     if (!file) return
-    const extension = file.name.slice(file.name.lastIndexOf('.')).toLowerCase()
-    if (!['.bmp', '.gif', '.jfif', '.jpeg', '.jpg', '.png', '.webp'].includes(extension)) {
+    const extension = fileExtension(file.name)
+    if (!photoExtensions.has(extension)) {
       setPhotoMessage('Selecciona una imagen JPG, PNG, WEBP, GIF, BMP o JFIF.')
       input.value = ''
       return
@@ -691,18 +705,17 @@ export function PetDetails({ pet, userId, refreshSignal, role, professionalName,
     const target = `uploaded/mascotas/${folder}/${Date.now()}-${safeFileName(file.name)}`
     setChangingPhoto(true)
     setPhotoMessage('')
-    let storedPath = ''
     try {
       const writeId = randomUuid()
       await queueWrites([{ id: writeId, userId, createdAt: Date.now(), kind: 'petPhoto', path: target, file,
         expectedVersion: pet.row_version, body: { petPath: `pets/${pet.id}`, previousPhoto: pet.photo_path } }])
-      await flushPendingWrites(userId)
-      if ((await pendingWrites(userId)).some((write) => write.id === writeId)) setPhotoMessage('Foto guardada en este dispositivo. Se subirá cuando vuelva la conexión.')
-      else {
+      setPhotoMessage('Foto guardada en este dispositivo. Se subirá cuando vuelva la conexión.')
+      void flushPendingWrites(userId).then(async () => {
+        if ((await pendingWrites(userId)).some((write) => write.id === writeId)) return
         const updated = await localData<DetailedPet>(`pets/${pet.id}`)
         onPetChanged(updated)
         setPhotoMessage('Foto actualizada. La anterior se conserva hasta confirmar la sincronización.')
-      }
+      }).catch(() => {})
     } catch (changeError) {
       // Preserve an upload when its database response may have been lost.
       setPhotoMessage(changeError instanceof Error ? changeError.message : 'No fue posible cambiar la foto.')

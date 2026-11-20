@@ -185,6 +185,7 @@ test('rechaza rutas de archivo fuera de uploaded', () => {
   assert.throws(() => validateClinicalFile({ ...metadata, object_path: 'uploaded/../secreto.txt' }), /Ruta/)
   assert.throws(() => validateClinicalFile({ ...metadata, object_path: 'uploaded/clinicos\\secreto.txt' }), /Ruta/)
   assert.throws(() => validateClinicalFile({ ...metadata, original_name: '../secreto.txt' }), /Nombre/)
+  assert.equal(validateClinicalFile({ ...metadata, object_path: 'uploaded/clinicos/1/video.mov', original_name: 'video.mov', mime_type: 'video/quicktime' }).mime_type, 'video/quicktime')
 })
 
 test('verifica el archivo físico y guarda checksum y operación en la misma transacción', async () => {

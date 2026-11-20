@@ -5,6 +5,6 @@ export async function localData<T>(path: string, init?: RequestInit): Promise<T>
   return body.data
 }
 
-export function localWrite<T>(path: string, method: 'POST' | 'PATCH' | 'DELETE', body: unknown) {
-  return localData<T>(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+export function localWrite<T>(path: string, method: 'POST' | 'PATCH' | 'DELETE', body: unknown, signal?: AbortSignal) {
+  return localData<T>(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal })
 }

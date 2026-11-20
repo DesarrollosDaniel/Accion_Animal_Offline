@@ -104,9 +104,12 @@ La administración de cuentas se realiza en el servidor local, incluso sin Inter
 
 ### Cambios pendientes en cada dispositivo
 
-Al registrar una mascota o un expediente nuevo, o al cambiar la foto de una mascota, la aplicación guarda primero la solicitud en IndexedDB del navegador. Los adjuntos clínicos seleccionados se guardan junto con la consulta. Después intenta enviarlos al PC servidor y vuelve a intentar cada 15 segundos y cuando el navegador detecta que regresó la conexión. La pantalla muestra cuántos cambios siguen pendientes. Los reintentos usan el mismo identificador para evitar altas duplicadas si se perdió la respuesta del servidor.
+Al registrar una mascota o un expediente nuevo, o al cambiar la foto de una mascota, la aplicación guarda primero la solicitud en IndexedDB del navegador. Los adjuntos clínicos seleccionados se guardan junto con la consulta. El formulario se cierra en cuanto termina esa copia local, sin esperar la respuesta del PC. Después intenta enviarlos al PC servidor y vuelve a intentar cada 15 segundos, al regresar a la pestaña y cuando el navegador detecta que regresó la conexión. Una solicitud de red sin respuesta se interrumpe para que no bloquee los intentos siguientes. La pantalla muestra cuántos cambios siguen pendientes. Los reintentos usan el mismo identificador para evitar altas duplicadas si se perdió la respuesta del servidor.
 
 Los pendientes pertenecen al usuario que los creó y se envían cuando ese usuario vuelve a iniciar sesión en el mismo navegador. Mantén la aplicación abierta para que se ejecuten los reintentos. No borres los datos del navegador, uses navegación privada ni desinstales la aplicación mientras haya pendientes: el navegador puede eliminar ese almacenamiento. Para abrir la aplicación o iniciar sesión de nuevo se necesita conexión con el PC servidor. Las ediciones de expedientes existentes todavía requieren conexión.
+
+Los videos MOV de iPad se admiten como documentos clínicos (hasta 50 MB por archivo). Si un archivo de otro formato queda rechazado, el aviso permite descargar su copia local y quitar solo ese archivo pendiente; el expediente y los demás adjuntos permanecen en la cola.
+El aviso de pendientes se puede ocultar sin borrar archivos. Un indicador compacto conserva el número de pendientes y permite volver a abrir los detalles. Si cambia el contenido de la cola, el aviso vuelve a mostrarse.
 
 La configuración de esta copia de pruebas está en `.env.local`, archivo ignorado por Git. Debe contener la URL y la clave publicable del proyecto Supabase de pruebas.
 

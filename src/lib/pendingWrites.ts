@@ -63,20 +63,42 @@ async function removeWrite(id: string) {
   window.dispatchEvent(new Event('pending-writes-changed'))
 }
 
-async function uploadQueuedFile(path: string, file: File) {
+export async function discardPendingFile(userId: string, id: string) {
+  if (running) throw new Error('Espera a que termine el intento de envío antes de quitar el archivo.')
+  const write = (await pendingWrites(userId)).find((entry) => entry.id === id)
+  if (!write || (write.kind !== 'file' && write.kind !== 'petPhoto')) {
+    throw new Error('Este archivo pendiente ya no está disponible.')
+  }
+  await removeWrite(id)
+}
+
+async function uploadQueuedFile(path: string, file: File, signal: AbortSignal) {
   try {
-    await uploadLocalFile(path, file)
+    await uploadLocalFile(path, file, signal)
   } catch (cause) {
     if (!(cause instanceof Error) || cause.message !== 'Ya existe un archivo con esa ruta.') throw cause
     const target = localFileUrl(path)
     if (!target) throw cause
-    const response = await fetch(target, { credentials: 'same-origin' })
+    const response = await fetch(target, { credentials: 'same-origin', signal })
     if (!response.ok) throw cause
     const existing = new Uint8Array(await response.arrayBuffer())
     if (existing.length !== file.size) throw cause
     const original = new Uint8Array(await file.arrayBuffer())
     for (let index = 0; index < existing.length; index++) if (existing[index] !== original[index]) throw cause
   }
+}
+
+async function withNetworkTimeout<T>(milliseconds: number, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController()
+  let timer = 0
+  const timeout = new Promise<never>((_, reject) => {
+    timer = window.setTimeout(() => {
+      reject(new Error('El PC no respondió a tiempo. Se intentará de nuevo.'))
+      controller.abort()
+    }, milliseconds)
+  })
+  try { return await Promise.race([work(controller.signal), timeout]) }
+  finally { window.clearTimeout(timer) }
 }
 
 export async function flushPendingWrites(userId: string): Promise<{ remaining: number; error: string }> {
@@ -87,21 +109,25 @@ export async function flushPendingWrites(userId: string): Promise<{ remaining: n
   try {
     for (const write of await pendingWrites(userId)) {
       try {
-        if (write.kind === 'pet' || write.kind === 'record') {
-          await localWrite(write.path, 'POST', write.body)
-        } else if (write.kind === 'file') {
-          await uploadQueuedFile(write.path, write.file!)
-          await localWrite(write.body!.recordPath as string, 'POST', write.body!.metadata)
-        } else {
-          await uploadQueuedFile(write.path, write.file!)
-          const pet = await localData<{ row_version: string; photo_path: string | null }>(write.body!.petPath as string)
-          if (pet.photo_path !== write.path) {
-            if (pet.row_version !== write.expectedVersion && pet.photo_path !== write.body!.previousPhoto) {
-              throw new Error('La foto de la mascota cambió en el servidor. Revisa esta subida pendiente.')
+        await withNetworkTimeout(write.file ? 90_000 : 30_000, async (signal) => {
+          if (write.kind === 'pet' || write.kind === 'record') {
+            await localWrite(write.path, 'POST', write.body, signal)
+          } else if (write.kind === 'file') {
+            await uploadQueuedFile(write.path, write.file!, signal)
+            const metadata = write.body!.metadata as Record<string, unknown>
+            await localWrite(write.body!.recordPath as string, 'POST', write.path.toLowerCase().endsWith('.mov') && metadata.kind === 'photo'
+              ? { ...metadata, kind: 'document' } : metadata, signal)
+          } else {
+            await uploadQueuedFile(write.path, write.file!, signal)
+            const pet = await localData<{ row_version: string; photo_path: string | null }>(write.body!.petPath as string, { signal })
+            if (pet.photo_path !== write.path) {
+              if (pet.row_version !== write.expectedVersion && pet.photo_path !== write.body!.previousPhoto) {
+                throw new Error('La foto de la mascota cambió en el servidor. Revisa esta subida pendiente.')
+              }
+              await localWrite(write.body!.petPath as string, 'PATCH', { expected_version: pet.row_version, changes: { photo_path: write.path } }, signal)
             }
-            await localWrite(write.body!.petPath as string, 'PATCH', { expected_version: pet.row_version, changes: { photo_path: write.path } })
           }
-        }
+        })
         await removeWrite(write.id)
         completed++
       } catch (cause) {

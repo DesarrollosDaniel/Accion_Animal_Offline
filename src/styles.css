@@ -274,6 +274,9 @@ tbody tr:hover { background: #fbfdfc; }
 .alert.success { margin: 0 0 18px; color: #176b4d; background: #e8f7ef; border-color: #c7e8d6; }
 .alert.error { display: grid; color: #8c3434; background: #fff0f0; border-color: #f1cdcd; margin: 0 0 18px; }
 .alert.error span { font-size: .78rem; }
+.pending-alert { margin: 0 0 18px; flex-wrap: wrap; }
+.pending-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.pending-summary { margin-bottom: 18px; }
 .modal-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(11,37,28,.5); backdrop-filter: blur(3px); }
 .modal { width: min(760px, 100%); max-height: calc(100dvh - 40px); overflow-y: auto; overscroll-behavior: contain; border-radius: 15px; background: white; box-shadow: 0 30px 80px rgba(8,40,28,.24); }
 .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px; border-bottom: 1px solid var(--line); }

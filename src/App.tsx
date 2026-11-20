@@ -25,7 +25,7 @@ import { currentLocalUser, localLogin, type LocalUser } from './lib/localAuth'
 import { vaccineOptions } from './lib/vaccines'
 import type { DetailedPet } from './components/PetDetails'
 import { localData, localWrite } from './lib/localApi'
-import { flushPendingWrites, pendingWrites, queueWrites } from './lib/pendingWrites'
+import { discardPendingFile, flushPendingWrites, pendingWrites, queueWrites } from './lib/pendingWrites'
 import { randomUuid } from './lib/uuid'
 const PetDetails = lazy(() => import('./components/PetDetails').then((module) => ({ default: module.PetDetails })))
 const environmentLabel = import.meta.env.MODE === 'production' ? null : 'PRUEBAS'
@@ -259,7 +259,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   )
 }
 
-function PetForm({ userId, onClose, onSaved }: { userId: string; onClose: () => void; onSaved: (petId: string) => Promise<void> }) {
+function PetForm({ userId, onClose }: { userId: string; onClose: () => void }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [species, setSpecies] = useState<keyof typeof vaccineOptions | ''>('')
@@ -329,9 +329,8 @@ function PetForm({ userId, onClose, onSaved }: { userId: string; onClose: () => 
         vaccinations: selectedVaccinations.map((entry) => ({ ...entry, administered_on: entry.administered_on || todayDateValue() })),
         note: observation || null,
       } }])
-      await flushPendingWrites(userId)
-      if (!(await pendingWrites(userId)).some((write) => write.id === id)) await onSaved(id).catch(() => {})
       onClose()
+      void flushPendingWrites(userId).catch(() => {})
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'No fue posible guardar la mascota local.')
     } finally {
@@ -522,6 +521,7 @@ function ReactivateUserForm({ user, onClose, onReactivated }: { user: Profile; o
 
 function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSignOut: () => Promise<void> }) {
   const workspaceStorageKey = `accion-animal:workspace:${session.user.id}`
+  const pendingDismissKey = `accion-animal:pending-dismissed:${session.user.id}`
   const restoredWorkspace = useMemo(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(workspaceStorageKey) || '{}') as { view?: unknown; search?: unknown; selectedPetId?: unknown; expandedPetId?: unknown }
@@ -552,6 +552,12 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
   const [selectedPetId, setSelectedPetId] = useState<string | null>(restoredWorkspace.selectedPetId)
   const [pendingCount, setPendingCount] = useState(0)
   const [pendingError, setPendingError] = useState('')
+  const [pendingRecoveryError, setPendingRecoveryError] = useState('')
+  const [pendingFile, setPendingFile] = useState<{ id: string; name: string } | null>(null)
+  const [pendingSignature, setPendingSignature] = useState('')
+  const [dismissedPendingSignature, setDismissedPendingSignature] = useState(() => {
+    try { return localStorage.getItem(pendingDismissKey) || '' } catch { return '' }
+  })
   const [syncEpoch, setSyncEpoch] = useState(0)
 
   const loadData = useCallback(async () => {
@@ -575,7 +581,15 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
   useEffect(() => {
     let active = true
     let syncing = false
-    const refresh = () => { void pendingWrites(session.user.id).then((writes) => { if (active) setPendingCount(writes.length) }).catch(() => {}) }
+    const refresh = () => { void pendingWrites(session.user.id).then((writes) => {
+      if (!active) return
+      setPendingCount(writes.length)
+      setPendingSignature(writes.map((write) => write.id).join(','))
+      const first = writes[0]
+      setPendingFile(first && (first.kind === 'file' || first.kind === 'petPhoto')
+        ? { id: first.id, name: first.file?.name || String((first.body?.metadata as { original_name?: string } | undefined)?.original_name || 'archivo') }
+        : null)
+    }).catch(() => {}) }
     const sync = async () => {
       if (syncing) return
       syncing = true
@@ -596,11 +610,13 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
     void sync()
     const timer = window.setInterval(() => void sync(), 15000)
     const online = () => void sync()
+    const visible = () => { if (document.visibilityState === 'visible') void sync() }
     const synced = () => { setSyncEpoch((value) => value + 1); void loadData() }
     window.addEventListener('online', online)
+    document.addEventListener('visibilitychange', visible)
     window.addEventListener('pending-writes-changed', refresh)
     window.addEventListener('pending-writes-synced', synced)
-    return () => { active = false; window.clearInterval(timer); window.removeEventListener('online', online); window.removeEventListener('pending-writes-changed', refresh); window.removeEventListener('pending-writes-synced', synced) }
+    return () => { active = false; window.clearInterval(timer); window.removeEventListener('online', online); document.removeEventListener('visibilitychange', visible); window.removeEventListener('pending-writes-changed', refresh); window.removeEventListener('pending-writes-synced', synced) }
   }, [session.user.id, loadData])
 
   useEffect(() => { void loadData() }, [loadData])
@@ -687,6 +703,40 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
 
   const todayLabel = new Intl.DateTimeFormat('es-MX', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date())
 
+  function hidePendingNotice() {
+    setDismissedPendingSignature(pendingSignature)
+    try { localStorage.setItem(pendingDismissKey, pendingSignature) } catch {}
+  }
+
+  function showPendingNotice() {
+    setDismissedPendingSignature('')
+    try { localStorage.removeItem(pendingDismissKey) } catch {}
+  }
+
+  async function downloadPendingCopy() {
+    if (!pendingFile) return
+    const write = (await pendingWrites(session.user.id)).find((entry) => entry.id === pendingFile.id)
+    if (!write?.file) return
+    const url = URL.createObjectURL(write.file)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = pendingFile.name
+    link.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  }
+
+  async function removeRejectedFile() {
+    if (!pendingFile || !window.confirm(`¿Quitar ${pendingFile.name} de los pendientes de esta iPad? El expediente y los demás archivos se conservarán. Guarda una copia antes si este es el único ejemplar.`)) return
+    try {
+      await discardPendingFile(session.user.id, pendingFile.id)
+      setPendingError('')
+      setPendingRecoveryError('')
+      void flushPendingWrites(session.user.id).catch(() => {})
+    } catch (cause) {
+      setPendingRecoveryError(cause instanceof Error ? cause.message : 'No se pudo quitar el archivo pendiente.')
+    }
+  }
+
   if (loading && !profile) return <div className="app-loader"><span className="loader" /><p>Cargando espacio de trabajo…</p></div>
 
   if (!profile || !profile.is_active) {
@@ -733,7 +783,18 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
         <div className="content">
           {error && <div className="alert error"><strong>No se pudo cargar toda la información.</strong><span>{error}</span></div>}
           {notice && <div className="alert success" role="status"><ShieldCheck size={18} /><span>{notice}</span></div>}
-          {pendingCount > 0 && <div className="alert" role="status"><span>{pendingCount} cambio{pendingCount === 1 ? '' : 's'} guardado{pendingCount === 1 ? '' : 's'} en este dispositivo, pendiente{pendingCount === 1 ? '' : 's'} de enviar al PC servidor. Mantén la aplicación abierta cuando vuelva la conexión. {pendingError && `Último intento: ${pendingError}`}</span><button className="button secondary" onClick={() => void flushPendingWrites(session.user.id).then((result) => { setPendingCount(result.remaining); setPendingError(result.error) })}>Reintentar ahora</button></div>}
+          {pendingCount > 0 && pendingSignature !== '' && pendingSignature === dismissedPendingSignature && <button className="button secondary pending-summary" onClick={showPendingNotice}>{pendingCount} pendiente{pendingCount === 1 ? '' : 's'} · Ver detalles</button>}
+          {pendingCount > 0 && (pendingSignature === '' || pendingSignature !== dismissedPendingSignature) && <div className="alert pending-alert" role="status">
+            <span>{pendingCount} cambio{pendingCount === 1 ? '' : 's'} guardado{pendingCount === 1 ? '' : 's'} en este dispositivo, pendiente{pendingCount === 1 ? '' : 's'} de enviar al PC servidor. Mantén la aplicación abierta cuando vuelva la conexión. {pendingError && `Último intento: ${pendingError}`} {pendingRecoveryError}</span>
+            <div className="pending-actions">
+              <button className="button secondary" onClick={() => void flushPendingWrites(session.user.id).then((result) => { setPendingCount(result.remaining); setPendingError(result.error) })}>Reintentar ahora</button>
+              {pendingError && pendingFile && <>
+                <button className="button secondary" onClick={() => void downloadPendingCopy().catch((cause) => setPendingRecoveryError(cause instanceof Error ? cause.message : 'No se pudo descargar la copia.'))}>Descargar {pendingFile.name}</button>
+                <button className="button secondary" onClick={() => void removeRejectedFile()}>Quitar archivo pendiente</button>
+              </>}
+              <button className="button secondary" onClick={hidePendingNotice}>Ocultar aviso</button>
+            </div>
+          </div>}
 
 
           {view === 'dashboard' && (
@@ -787,7 +848,7 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
         </div>
       </main>
 
-      {modal === 'pet' && <Modal title="Registrar mascota" onClose={() => setModal(null)}><PetForm userId={session.user.id} onClose={() => setModal(null)} onSaved={async (petId) => { await loadData(); setView('pets'); setSearch(''); setSearchResults(null); setSelectedPetId(petId); setNotice('Mascota, tutor y vacunas registrados.') }} /></Modal>}
+      {modal === 'pet' && <Modal title="Registrar mascota" onClose={() => setModal(null)}><PetForm userId={session.user.id} onClose={() => setModal(null)} /></Modal>}
       {modal === 'create-user' && <Modal title="Crear acceso" onClose={() => setModal(null)}><CreateUserForm onClose={() => setModal(null)} onCreated={async () => { await loadData(); setNotice('Acceso creado y validado. La persona ya puede iniciar sesión con el correo y la contraseña definidos.') }} /></Modal>}
       {userToDelete && <Modal title="Desactivar usuario" onClose={() => setUserToDelete(null)}><DeleteUserForm user={userToDelete} onClose={() => setUserToDelete(null)} onDeleted={async () => { await loadData(); setProfiles(await localData<Profile[]>('profiles')); setNotice('Usuario desactivado. Sus acciones, expedientes y archivos se conservaron.') }} /></Modal>}
       {userToReactivate && <Modal title="Reactivar usuario" onClose={() => setUserToReactivate(null)}><ReactivateUserForm user={userToReactivate} onClose={() => setUserToReactivate(null)} onReactivated={async () => { await loadData(); setProfiles(await localData<Profile[]>('profiles')); setNotice('Usuario reactivado. Ya puede iniciar sesión con las nuevas credenciales.') }} /></Modal>}

@@ -31,14 +31,14 @@ const mimeTypes = new Map([
   ['.js', 'text/javascript; charset=utf-8'], ['.json', 'application/json; charset=utf-8'],
   ['.mjs', 'text/javascript; charset=utf-8'], ['.pdf', 'application/pdf'], ['.png', 'image/png'],
   ['.svg', 'image/svg+xml'], ['.txt', 'text/plain; charset=utf-8'], ['.webp', 'image/webp'],
-  ['.woff', 'font/woff'], ['.woff2', 'font/woff2'], ['.mp4', 'video/mp4'],
+  ['.woff', 'font/woff'], ['.woff2', 'font/woff2'], ['.mp4', 'video/mp4'], ['.mov', 'video/quicktime'],
   ['.doc', 'application/msword'], ['.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
   ['.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
   ['.xls', 'application/vnd.ms-excel'], ['.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
 ])
 
 const allowedUploadExtensions = new Set([
-  '.bmp', '.doc', '.docx', '.gif', '.jfif', '.jpeg', '.jpg', '.mp4', '.pdf', '.png', '.pptx', '.txt', '.webp', '.xls', '.xlsx',
+  '.bmp', '.doc', '.docx', '.gif', '.jfif', '.jpeg', '.jpg', '.mov', '.mp4', '.pdf', '.png', '.pptx', '.txt', '.webp', '.xls', '.xlsx',
 ])
 
 function json(res, status, body, extraHeaders = {}) {

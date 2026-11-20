@@ -16,7 +16,7 @@ export async function clearLocalSession() {
   await fetch('/api/local-session', { method: 'DELETE', credentials: 'same-origin' }).catch(() => {})
 }
 
-export async function uploadLocalFile(path: string, file: File) {
+export async function uploadLocalFile(path: string, file: File, signal?: AbortSignal) {
   const target = localFileUrl(path)
   if (!target) throw new Error('La ruta local del archivo no es válida.')
   const response = await fetch(target, {
@@ -24,6 +24,7 @@ export async function uploadLocalFile(path: string, file: File) {
     credentials: 'same-origin',
     headers: { 'Content-Type': file.type || 'application/octet-stream' },
     body: file,
+    signal,
   })
   const body = await response.json().catch(() => ({})) as { error?: string; path?: string }
   if (!response.ok || !body.path) throw new Error(body.error || `No fue posible guardar ${file.name}.`)
