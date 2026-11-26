@@ -1,4 +1,4 @@
-import { FormEvent, lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import { FormEvent, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   CalendarDays,
@@ -259,7 +259,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   )
 }
 
-function PetForm({ userId, onClose }: { userId: string; onClose: () => void }) {
+function PetForm({ userId, onClose, onQueued }: { userId: string; onClose: () => void; onQueued: (petId: string) => void }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [species, setSpecies] = useState<keyof typeof vaccineOptions | ''>('')
@@ -329,6 +329,7 @@ function PetForm({ userId, onClose }: { userId: string; onClose: () => void }) {
         vaccinations: selectedVaccinations.map((entry) => ({ ...entry, administered_on: entry.administered_on || todayDateValue() })),
         note: observation || null,
       } }])
+      onQueued(id)
       onClose()
       void flushPendingWrites(userId).catch(() => {})
     } catch (cause) {
@@ -550,6 +551,7 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
   const [userToDelete, setUserToDelete] = useState<Profile | null>(null)
   const [userToReactivate, setUserToReactivate] = useState<Profile | null>(null)
   const [selectedPetId, setSelectedPetId] = useState<string | null>(restoredWorkspace.selectedPetId)
+  const pendingCreatedPetId = useRef<string | null>(null)
   const [pendingCount, setPendingCount] = useState(0)
   const [pendingError, setPendingError] = useState('')
   const [pendingRecoveryError, setPendingRecoveryError] = useState('')
@@ -611,7 +613,20 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
     const timer = window.setInterval(() => void sync(), 15000)
     const online = () => void sync()
     const visible = () => { if (document.visibilityState === 'visible') void sync() }
-    const synced = () => { setSyncEpoch((value) => value + 1); void loadData() }
+    const synced = () => {
+      setSyncEpoch((value) => value + 1)
+      void loadData()
+      const petId = pendingCreatedPetId.current
+      if (petId) void pendingWrites(session.user.id).then((writes) => {
+        if (!active || pendingCreatedPetId.current !== petId || writes.some((write) => write.id === petId)) return
+        pendingCreatedPetId.current = null
+        setView('pets')
+        setSearch('')
+        setSearchResults(null)
+        setSelectedPetId(petId)
+        setNotice('Mascota, tutor y vacunas registrados.')
+      }).catch(() => {})
+    }
     window.addEventListener('online', online)
     document.addEventListener('visibilitychange', visible)
     window.addEventListener('pending-writes-changed', refresh)
@@ -695,6 +710,7 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
     : null
 
   const openView = (nextView: View) => {
+    pendingCreatedPetId.current = null
     setView(nextView)
     setSearch('')
     setSelectedPetId(null)
@@ -822,17 +838,17 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
           {(view === 'pets' || view === 'inactive-pets') && (
             <section className="panel page-panel">
               <div className="page-actions"><div><p className="eyebrow">Expedientes</p><h2>{view === 'inactive-pets' ? 'Decesos' : 'Mascotas'}</h2><p className="muted">{view === 'inactive-pets' ? 'Mascotas enviadas a decesos. El estado se puede revertir.' : 'La búsqueda muestra únicamente mascotas activas.'}</p></div>{view === 'pets' && profile.role !== 'reception' && <button className="button primary" onClick={() => setModal('pet')}><Plus size={18} /> Nueva mascota</button>}</div>
-              <div className="search-box"><input value={search} maxLength={100} onChange={(event) => { setSearch(event.target.value); setSelectedPetId(null) }} placeholder="Buscar por ID, mascota, especie, raza, tutor o teléfono" /><Search size={19} /></div>
+              <div className="search-box"><input value={search} maxLength={100} onChange={(event) => { pendingCreatedPetId.current = null; setSearch(event.target.value); setSelectedPetId(null) }} placeholder="Buscar por ID, mascota, especie, raza, tutor o teléfono" /><Search size={19} /></div>
               {selectedPet ? (
                 <section className="pet-detail-section" aria-labelledby="selected-pet-title">
                   <header className="pet-detail-header">
-                    <button className="button primary" onClick={() => setSelectedPetId(null)}><ArrowLeft size={18} /> Volver a resultados</button>
+                    <button className="button primary" onClick={() => { pendingCreatedPetId.current = null; setSelectedPetId(null) }}><ArrowLeft size={18} /> Volver a resultados</button>
                     <div><p className="eyebrow">Detalle de mascota</p><h3 id="selected-pet-title">{selectedPet.name}</h3></div>
                   </header>
                   <Suspense fallback={<p>Cargando ficha…</p>}><PetDetails key={selectedPet.id} pet={selectedPet} userId={session.user.id} refreshSignal={syncEpoch} role={profile.role} professionalName={profile.display_name} onPetChanged={(updatedPet, movedList = false) => { setPets((current) => current.map((item) => item.id === updatedPet.id ? updatedPet : item)); setSearchResults((current) => current?.map((item) => item.id === updatedPet.id ? updatedPet : item) || null); if (movedList) { setSelectedPetId(null); void loadData() } }} onPetDeleted={() => { setSelectedPetId(null); setSearchResults(null); void loadData() }} onRecordsChanged={() => void localData<{ activePets: number; inactivePets: number; clinicalRecords: number }>('summary').then(setDashboardCounts).catch((cause) => setError(String(cause)))} /></Suspense>
                 </section>
               ) : filteredPets.length === 0 ? <EmptyState icon={PawPrint} title="Sin resultados" text={search ? 'Prueba con otro término de búsqueda.' : 'Todavía no hay mascotas registradas.'} /> : (
-                <div className="table-wrap responsive-table pet-table-wrap"><table><thead><tr><th>Mascota</th><th>Tutor</th><th>Teléfono</th><th>Especie / raza</th><th>Estado</th><th>Registro</th><th className="actions-column">Acción</th></tr></thead><tbody>{filteredPets.map((pet) => <tr className="clickable-row" key={pet.id} tabIndex={0} onClick={() => setSelectedPetId(pet.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedPetId(pet.id) } }}><td data-label="Mascota"><div className="name-cell"><PetAvatar pet={pet} size={17} /><strong>{pet.name}</strong></div></td><td data-label="Tutor">{pet.guardian_name}</td><td data-label="Teléfono">{pet.guardian_phone || '—'}</td><td data-label="Especie / raza">{[pet.species, pet.breed].filter(Boolean).join(' · ') || '—'}</td><td data-label="Estado"><span className={`status ${pet.status}`}>{pet.status === 'active' ? 'Activo' : 'Deceso'}</span></td><td data-label="Registro">{formatDate(pet.created_at)}</td><td className="actions-column"><button className="text-button detail-button" onClick={() => setSelectedPetId(pet.id)} aria-label={`Ver detalle de ${pet.name}`}>Abrir ficha</button></td></tr>)}</tbody></table></div>
+                <div className="table-wrap responsive-table pet-table-wrap"><table><thead><tr><th>Mascota</th><th>Tutor</th><th>Teléfono</th><th>Especie / raza</th><th>Estado</th><th>Registro</th><th className="actions-column">Acción</th></tr></thead><tbody>{filteredPets.map((pet) => <tr className="clickable-row" key={pet.id} tabIndex={0} onClick={() => { pendingCreatedPetId.current = null; setSelectedPetId(pet.id) }} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); pendingCreatedPetId.current = null; setSelectedPetId(pet.id) } }}><td data-label="Mascota"><div className="name-cell"><PetAvatar pet={pet} size={17} /><strong>{pet.name}</strong></div></td><td data-label="Tutor">{pet.guardian_name}</td><td data-label="Teléfono">{pet.guardian_phone || '—'}</td><td data-label="Especie / raza">{[pet.species, pet.breed].filter(Boolean).join(' · ') || '—'}</td><td data-label="Estado"><span className={`status ${pet.status}`}>{pet.status === 'active' ? 'Activo' : 'Deceso'}</span></td><td data-label="Registro">{formatDate(pet.created_at)}</td><td className="actions-column"><button className="text-button detail-button" onClick={() => { pendingCreatedPetId.current = null; setSelectedPetId(pet.id) }} aria-label={`Ver detalle de ${pet.name}`}>Abrir ficha</button></td></tr>)}</tbody></table></div>
               )}
             </section>
           )}
@@ -848,7 +864,7 @@ function Workspace({ session, onSignOut }: { session: { user: LocalUser }; onSig
         </div>
       </main>
 
-      {modal === 'pet' && <Modal title="Registrar mascota" onClose={() => setModal(null)}><PetForm userId={session.user.id} onClose={() => setModal(null)} /></Modal>}
+      {modal === 'pet' && <Modal title="Registrar mascota" onClose={() => setModal(null)}><PetForm userId={session.user.id} onClose={() => setModal(null)} onQueued={(petId) => { pendingCreatedPetId.current = petId }} /></Modal>}
       {modal === 'create-user' && <Modal title="Crear acceso" onClose={() => setModal(null)}><CreateUserForm onClose={() => setModal(null)} onCreated={async () => { await loadData(); setNotice('Acceso creado y validado. La persona ya puede iniciar sesión con el correo y la contraseña definidos.') }} /></Modal>}
       {userToDelete && <Modal title="Desactivar usuario" onClose={() => setUserToDelete(null)}><DeleteUserForm user={userToDelete} onClose={() => setUserToDelete(null)} onDeleted={async () => { await loadData(); setProfiles(await localData<Profile[]>('profiles')); setNotice('Usuario desactivado. Sus acciones, expedientes y archivos se conservaron.') }} /></Modal>}
       {userToReactivate && <Modal title="Reactivar usuario" onClose={() => setUserToReactivate(null)}><ReactivateUserForm user={userToReactivate} onClose={() => setUserToReactivate(null)} onReactivated={async () => { await loadData(); setProfiles(await localData<Profile[]>('profiles')); setNotice('Usuario reactivado. Ya puede iniciar sesión con las nuevas credenciales.') }} /></Modal>}
