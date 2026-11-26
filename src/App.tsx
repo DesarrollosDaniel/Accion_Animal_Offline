@@ -268,7 +268,7 @@ function PetForm({ userId, onClose, onQueued }: { userId: string; onClose: () =>
   function changeVaccine(index: number, vaccineName: string) {
     setVaccinations((current) => {
       const next = current.map((entry, entryIndex) => entryIndex === index ? { ...entry, vaccine_name: vaccineName } : entry)
-      if (vaccineName && species && index === current.length - 1 && current.length < vaccineOptions[species].length) next.push({ vaccine_name: '', administered_on: todayDateValue() })
+      if (vaccineName && index === current.length - 1) next.push({ vaccine_name: '', administered_on: todayDateValue() })
       return next
     })
   }
@@ -276,7 +276,7 @@ function PetForm({ userId, onClose, onQueued }: { userId: string; onClose: () =>
   function removeVaccine(index: number) {
     setVaccinations((current) => {
       const next = current.filter((_, entryIndex) => entryIndex !== index)
-      if (species && next.every((entry) => entry.vaccine_name) && next.length < vaccineOptions[species].length) next.push({ vaccine_name: '', administered_on: todayDateValue() })
+      if (next.every((entry) => entry.vaccine_name)) next.push({ vaccine_name: '', administered_on: todayDateValue() })
       return next
     })
   }
@@ -359,7 +359,7 @@ function PetForm({ userId, onClose, onQueued }: { userId: string; onClose: () =>
       <label className="span-2">Observaciones de mascota o propietario<textarea name="observation" rows={3} maxLength={2000} placeholder="Ej. Cliente de trato difícil o mascota con parvovirus" /></label>
       <div className="form-section-title span-2"><span>Vacunas</span><small>Opcional</small></div>
       {vaccinations.map((vaccination, index) => <div className="vaccine-entry span-2" key={index}>
-        <label>Tipo de vacuna<select value={vaccination.vaccine_name} disabled={!species} onChange={(event) => changeVaccine(index, event.target.value)}><option value="">{species ? 'Selecciona una vacuna' : 'Selecciona primero la especie'}</option>{species && vaccineOptions[species].filter((name) => name === vaccination.vaccine_name || !vaccinations.some((entry) => entry.vaccine_name === name)).map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+        <label>Tipo de vacuna<select value={vaccination.vaccine_name} disabled={!species} onChange={(event) => changeVaccine(index, event.target.value)}><option value="">{species ? 'Selecciona una vacuna' : 'Selecciona primero la especie'}</option>{species && vaccineOptions[species].map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
         <label>Fecha de aplicación<input type="date" value={vaccination.administered_on} onChange={(event) => setVaccinations((current) => current.map((entry, entryIndex) => entryIndex === index ? { ...entry, administered_on: event.target.value } : entry))} /></label>
         {vaccination.vaccine_name && <button type="button" className="icon-button danger-icon" aria-label={`Quitar vacuna ${vaccination.vaccine_name}`} title="Quitar vacuna" onClick={() => removeVaccine(index)}><X size={17} /></button>}
       </div>)}

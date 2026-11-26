@@ -166,14 +166,14 @@ function PetEditForm({ pet, latestWeight, vaccinations, note, onSaved, onCancel 
   const availableVaccines = [...new Set([...vaccinesForSpecies(pet.species), ...vaccinations.map((entry) => entry.vaccine_name)])]
   const [vaccinationRows, setVaccinationRows] = useState<Vaccination[]>(() => {
     const rows = [...vaccinations]
-    if (rows.length < availableVaccines.length) rows.push({ id: randomUuid(), vaccine_name: '', administered_on: localDateTimeValue().slice(0, 10) })
+    if (rows.every((entry) => entry.vaccine_name)) rows.push({ id: randomUuid(), vaccine_name: '', administered_on: localDateTimeValue().slice(0, 10) })
     return rows.length ? rows : [{ id: randomUuid(), vaccine_name: '', administered_on: localDateTimeValue().slice(0, 10) }]
   })
 
   function changeVaccine(index: number, vaccineName: string) {
     setVaccinationRows((current) => {
       const next = current.map((entry, entryIndex) => entryIndex === index ? { ...entry, vaccine_name: vaccineName } : entry)
-      if (vaccineName && index === current.length - 1 && current.length < availableVaccines.length) next.push({ id: randomUuid(), vaccine_name: '', administered_on: localDateTimeValue().slice(0, 10) })
+      if (vaccineName && index === current.length - 1) next.push({ id: randomUuid(), vaccine_name: '', administered_on: localDateTimeValue().slice(0, 10) })
       return next
     })
   }
@@ -181,7 +181,7 @@ function PetEditForm({ pet, latestWeight, vaccinations, note, onSaved, onCancel 
   function removeVaccine(index: number) {
     setVaccinationRows((current) => {
       const next = current.filter((_, entryIndex) => entryIndex !== index)
-      if (next.every((entry) => entry.vaccine_name) && next.length < availableVaccines.length) next.push({ id: randomUuid(), vaccine_name: '', administered_on: localDateTimeValue().slice(0, 10) })
+      if (next.every((entry) => entry.vaccine_name)) next.push({ id: randomUuid(), vaccine_name: '', administered_on: localDateTimeValue().slice(0, 10) })
       return next.length ? next : [{ id: randomUuid(), vaccine_name: '', administered_on: localDateTimeValue().slice(0, 10) }]
     })
   }
@@ -198,11 +198,6 @@ function PetEditForm({ pet, latestWeight, vaccinations, note, onSaved, onCancel 
     const selectedVaccinations = vaccinationRows.filter((entry) => entry.vaccine_name)
     if (sterilizationDate && sterilizedValue !== 'true') {
       setError('Para guardar una fecha de esterilización, selecciona “Sí”.')
-      setSaving(false)
-      return
-    }
-    if (new Set(selectedVaccinations.map((entry) => entry.vaccine_name)).size !== selectedVaccinations.length) {
-      setError('No se puede registrar dos veces el mismo tipo de vacuna.')
       setSaving(false)
       return
     }
@@ -276,7 +271,7 @@ function PetEditForm({ pet, latestWeight, vaccinations, note, onSaved, onCancel 
       <label className="span-2">Observaciones de mascota o propietario<textarea name="observation" rows={3} maxLength={2000} defaultValue={note?.body || ''} placeholder="Ej. Cliente de trato difícil o mascota con parvovirus" /></label>
       <div className="form-section-title span-2"><span>Vacunas</span><small>Agrega, cambia o elimina vacunas</small></div>
       {vaccinationRows.map((vaccination, index) => <div className="vaccine-entry span-2" key={vaccination.id}>
-        <label>Tipo de vacuna<select value={vaccination.vaccine_name} onChange={(event) => changeVaccine(index, event.target.value)}><option value="">Selecciona una vacuna</option>{availableVaccines.filter((name) => name === vaccination.vaccine_name || !vaccinationRows.some((entry) => entry.vaccine_name === name)).map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+        <label>Tipo de vacuna<select value={vaccination.vaccine_name} onChange={(event) => changeVaccine(index, event.target.value)}><option value="">Selecciona una vacuna</option>{availableVaccines.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
         <label>Fecha de aplicación<input type="date" value={vaccination.administered_on} onChange={(event) => setVaccinationRows((current) => current.map((entry, entryIndex) => entryIndex === index ? { ...entry, administered_on: event.target.value } : entry))} /></label>
         {vaccination.vaccine_name && <button type="button" className="icon-button danger-icon" aria-label={`Eliminar vacuna ${vaccination.vaccine_name}`} title="Eliminar vacuna" onClick={() => removeVaccine(index)}><Trash2 size={17} /></button>}
       </div>)}
@@ -856,7 +851,7 @@ export function PetDetails({ pet, userId, refreshSignal, role, professionalName,
           <DetailItem label="ID histórico" value={pet.legacy_id ? String(pet.legacy_id) : 'Nuevo registro'} />
         </div>
         <div className="guardian-card"><h4>Responsable</h4><div className="detail-grid"><DetailItem label="Nombre" value={pet.guardian_name} /><DetailItem label="Teléfono" value={valueOrDash(pet.guardian_phone)} /><DetailItem label="Colonia" value={valueOrDash(pet.guardian_address)} /><DetailItem label="Calle" value={valueOrDash(pet.guardian_street)} /><DetailItem label="Número" value={valueOrDash(pet.guardian_number)} /><DetailItem label="Cómo conoció la clínica" value={valueOrDash(pet.referral_source)} /></div></div>
-        <div className="vaccination-card"><h4>Vacunas</h4>{loading ? <span className="muted">Cargando vacunas…</span> : vaccinations.length === 0 ? <span className="muted">Sin vacunas registradas.</span> : <table className="vaccination-table"><thead><tr><th>Fecha</th><th>Tipo de vacuna</th></tr></thead><tbody>{vaccinations.map((vaccination) => <tr key={vaccination.id}><td>{formatDate(vaccination.administered_on)}</td><td>{vaccination.vaccine_name}</td></tr>)}</tbody></table>}</div>
+        <div className="vaccination-card"><h4>Vacunas</h4>{loading ? <span className="muted">Cargando vacunas…</span> : vaccinations.length === 0 ? <span className="muted">Sin vacunas registradas.</span> : <table className="vaccination-table"><thead><tr><th>Fecha</th><th>Tipo de vacuna</th></tr></thead><tbody>{vaccinations.map((vaccination) => <tr key={vaccination.id}><td>{formatDate(vaccination.administered_on)}</td><td>{vaccination.vaccine_name}{vaccinations.some((earlier) => earlier.vaccine_name === vaccination.vaccine_name && (earlier.administered_on < vaccination.administered_on || (earlier.administered_on === vaccination.administered_on && earlier.id < vaccination.id))) && ' · Refuerzo'}</td></tr>)}</tbody></table>}</div>
       </section>}
 
       <section className="clinical-section">
